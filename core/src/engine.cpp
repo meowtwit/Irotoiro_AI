@@ -242,6 +242,7 @@ GameState initialState(Rng& rng) {
 
 std::vector<Move> legalPlacements(const GameState& state) {
   std::vector<Move> moves;
+  moves.reserve(75);
   const int player = state.toMove;
   for (uint8_t cell = 0; cell < 25; ++cell) {
     if (state.board[cell].kind != Empty) {
@@ -257,10 +258,36 @@ std::vector<Move> legalPlacements(const GameState& state) {
 }
 
 Move randomMove(const GameState& state, Rng& rng) {
-  const std::vector<Move> moves = legalPlacements(state);
-  assert(!moves.empty());
-  const int idx = static_cast<int>(std::floor(rng.next() * static_cast<double>(moves.size())));
-  return moves[idx];
+  const int player = state.toMove;
+  int count = 0;
+  for (uint8_t cell = 0; cell < 25; ++cell) {
+    if (state.board[cell].kind != Empty) {
+      continue;
+    }
+    for (uint8_t color = 0; color < 3; ++color) {
+      if (state.stock[player][color] > 0) {
+        ++count;
+      }
+    }
+  }
+
+  assert(count > 0);
+  int idx = static_cast<int>(std::floor(rng.next() * static_cast<double>(count)));
+  for (uint8_t cell = 0; cell < 25; ++cell) {
+    if (state.board[cell].kind != Empty) {
+      continue;
+    }
+    for (uint8_t color = 0; color < 3; ++color) {
+      if (state.stock[player][color] == 0) {
+        continue;
+      }
+      if (idx == 0) {
+        return Move{color, cell};
+      }
+      --idx;
+    }
+  }
+  return Move{};
 }
 
 DeterministicTurn resolveTurnDeterministic(const GameState& state, Move move) {
@@ -278,8 +305,9 @@ DeterministicTurn resolveTurnDeterministic(const GameState& state, Move move) {
     uint8_t mix = 0;
   };
 
-  std::vector<uint8_t> drawWindowIndices;
-  std::vector<AabWindow> aabWindows;
+  int drawWindowCount = 0;
+  std::array<AabWindow, 16> aabWindows{};
+  int aabWindowCount = 0;
 
   for (uint8_t wi : windowsThroughCell()[move.cell]) {
     const Window& window = windows()[wi];
@@ -300,7 +328,7 @@ DeterministicTurn resolveTurnDeterministic(const GameState& state, Move move) {
     }
 
     if (distinct == 1 || distinct == 3) {
-      drawWindowIndices.push_back(wi);
+      ++drawWindowCount;
       continue;
     }
 
@@ -321,14 +349,17 @@ DeterministicTurn resolveTurnDeterministic(const GameState& state, Move move) {
         break;
       }
     }
-    aabWindows.push_back(AabWindow{minorityCell, static_cast<uint8_t>(mixTile(majority, minority))});
+    aabWindows[aabWindowCount++] =
+        AabWindow{minorityCell, static_cast<uint8_t>(mixTile(majority, minority))};
   }
 
   std::array<bool, 25> consumed{};
   consumed.fill(false);
-  std::vector<uint8_t> placedTileCells;
+  std::array<uint8_t, 16> placedTileCells{};
+  int placedTileCount = 0;
 
-  for (const AabWindow& window : aabWindows) {
+  for (int i = 0; i < aabWindowCount; ++i) {
+    const AabWindow& window = aabWindows[i];
     if (consumed[window.minorityCell]) {
       continue;
     }
@@ -340,13 +371,14 @@ DeterministicTurn resolveTurnDeterministic(const GameState& state, Move move) {
     ++next.score[player];
     next.board[window.minorityCell] = Cell{Tile, window.mix};
     consumed[window.minorityCell] = true;
-    placedTileCells.push_back(window.minorityCell);
+    placedTileCells[placedTileCount++] = window.minorityCell;
     ++result.stats.exchanges;
   }
 
   std::array<bool, 48> seenTileWindows{};
   seenTileWindows.fill(false);
-  for (uint8_t placedCell : placedTileCells) {
+  for (int placedIndex = 0; placedIndex < placedTileCount; ++placedIndex) {
+    const uint8_t placedCell = placedTileCells[placedIndex];
     for (uint8_t wi : windowsThroughCell()[placedCell]) {
       if (seenTileWindows[wi]) {
         continue;
@@ -379,7 +411,7 @@ DeterministicTurn resolveTurnDeterministic(const GameState& state, Move move) {
     }
   }
 
-  result.drawBatches = static_cast<int>(drawWindowIndices.size());
+  result.drawBatches = drawWindowCount;
   return result;
 }
 

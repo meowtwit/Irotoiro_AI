@@ -3,10 +3,11 @@
 #include "irotoiro/bot.hpp"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
+#include <cstddef>
 #include <limits>
-#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -16,6 +17,8 @@ namespace {
 using Clock = std::chrono::steady_clock;
 
 SearchStats g_lastStats;
+constexpr std::size_t kMaxMoves = 75;
+constexpr std::size_t kMaxChanceOutcomes = 64;
 
 bool comesBefore(Move a, Move b) {
   if (a.cell != b.cell) {
@@ -39,58 +42,220 @@ double terminalValue(const GameState& state, int maximizingPlayer) {
   return 0.0;
 }
 
-std::string stateKey(const GameState& state, int depth, int maximizingPlayer) {
-  std::string key;
-  key.reserve(25 * 2 + 2 * 3 + 2 * 3 + 3 + 2 + 4);
-  key.push_back(static_cast<char>(depth));
-  key.push_back(static_cast<char>(maximizingPlayer));
-  for (const Cell& cell : state.board) {
-    key.push_back(static_cast<char>(cell.kind));
-    key.push_back(static_cast<char>(cell.color));
-  }
-  for (const auto& stock : state.stock) {
-    for (uint8_t n : stock) {
-      key.push_back(static_cast<char>(n));
+uint64_t splitmix64(uint64_t x) {
+  x += 0x9E3779B97F4A7C15ull;
+  x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ull;
+  x = (x ^ (x >> 27)) * 0x94D049BB133111EBull;
+  return x ^ (x >> 31);
+}
+
+struct ZobristTables {
+  std::array<std::array<uint64_t, 7>, 25> board{};
+  std::array<std::array<std::array<uint64_t, 5>, 3>, 2> stock{};
+  std::array<std::array<std::array<uint64_t, 7>, 3>, 2> hand{};
+  std::array<std::array<uint64_t, 9>, 3> bag{};
+  std::array<std::array<uint64_t, 25>, 2> score{};
+  std::array<uint64_t, 2> toMove{};
+  std::array<uint64_t, 2> maximizingPlayer{};
+  std::array<uint64_t, 32> depth{};
+};
+
+ZobristTables makeZobristTables() {
+  ZobristTables z;
+  uint64_t seed = 0xD1B54A32D192ED03ull;
+  auto next = [&]() {
+    seed = splitmix64(seed);
+    return seed;
+  };
+
+  for (auto& byCell : z.board) {
+    for (uint64_t& value : byCell) {
+      value = next();
     }
   }
-  for (const auto& hand : state.hand) {
-    for (uint8_t n : hand) {
-      key.push_back(static_cast<char>(n));
+  for (auto& byPlayer : z.stock) {
+    for (auto& byColor : byPlayer) {
+      for (uint64_t& value : byColor) {
+        value = next();
+      }
     }
   }
-  for (uint8_t n : state.bag) {
-    key.push_back(static_cast<char>(n));
+  for (auto& byPlayer : z.hand) {
+    for (auto& byTile : byPlayer) {
+      for (uint64_t& value : byTile) {
+        value = next();
+      }
+    }
   }
-  for (uint8_t n : state.score) {
-    key.push_back(static_cast<char>(n));
+  for (auto& byTile : z.bag) {
+    for (uint64_t& value : byTile) {
+      value = next();
+    }
   }
-  key.push_back(static_cast<char>(state.toMove));
-  return key;
+  for (auto& byPlayer : z.score) {
+    for (uint64_t& value : byPlayer) {
+      value = next();
+    }
+  }
+  for (uint64_t& value : z.toMove) {
+    value = next();
+  }
+  for (uint64_t& value : z.maximizingPlayer) {
+    value = next();
+  }
+  for (uint64_t& value : z.depth) {
+    value = next();
+  }
+  return z;
+}
+
+const ZobristTables& zobristTables() {
+  static const ZobristTables kTables = makeZobristTables();
+  return kTables;
+}
+
+uint8_t boardCode(const Cell& cell) {
+  if (cell.kind == Empty) {
+    return 0;
+  }
+  if (cell.kind == Ohajiki) {
+    return static_cast<uint8_t>(1 + cell.color);
+  }
+  return static_cast<uint8_t>(4 + cell.color);
+}
+
+uint64_t stateHash(const GameState& state, int depth, int maximizingPlayer) {
+  const ZobristTables& z = zobristTables();
+  uint64_t h = z.maximizingPlayer[maximizingPlayer] ^ z.toMove[state.toMove];
+  if (depth >= 0 && static_cast<std::size_t>(depth) < z.depth.size()) {
+    h ^= z.depth[static_cast<std::size_t>(depth)];
+  } else {
+    h ^= splitmix64(0xA0761D6478BD642Full ^ static_cast<uint64_t>(depth));
+  }
+  for (std::size_t cell = 0; cell < state.board.size(); ++cell) {
+    h ^= z.board[cell][boardCode(state.board[cell])];
+  }
+  for (std::size_t player = 0; player < 2; ++player) {
+    for (std::size_t color = 0; color < 3; ++color) {
+      h ^= z.stock[player][color][state.stock[player][color]];
+      h ^= z.hand[player][color][state.hand[player][color]];
+    }
+    h ^= z.score[player][state.score[player]];
+  }
+  for (std::size_t tile = 0; tile < 3; ++tile) {
+    h ^= z.bag[tile][state.bag[tile]];
+  }
+  return h;
 }
 
 struct OrderedMove {
   Move move;
+  DeterministicTurn resolved;
   int immediateScore = 0;
 };
 
-std::vector<OrderedMove> orderedMoves(const GameState& state, bool maximizingNode) {
-  const std::vector<Move> legal = legalPlacements(state);
-  std::vector<OrderedMove> ordered;
-  ordered.reserve(legal.size());
+struct OrderedMoveList {
+  std::array<OrderedMove, kMaxMoves> moves{};
+  std::size_t count = 0;
+};
+
+OrderedMoveList orderedMoves(const GameState& state, bool maximizingNode) {
+  OrderedMoveList ordered;
   const int player = state.toMove;
   const int before = scoreDiff(state, player);
-  for (Move move : legal) {
-    const DeterministicTurn resolved = resolveTurnDeterministic(state, move);
-    ordered.push_back(OrderedMove{move, scoreDiff(resolved.state, player) - before});
-  }
-  std::stable_sort(ordered.begin(), ordered.end(), [&](const OrderedMove& a, const OrderedMove& b) {
-    if (a.immediateScore != b.immediateScore) {
-      return maximizingNode ? a.immediateScore > b.immediateScore
-                            : a.immediateScore < b.immediateScore;
+  for (uint8_t cell = 0; cell < 25; ++cell) {
+    if (state.board[cell].kind != Empty) {
+      continue;
     }
-    return comesBefore(a.move, b.move);
-  });
+    for (uint8_t color = 0; color < 3; ++color) {
+      if (state.stock[player][color] == 0) {
+        continue;
+      }
+      Move move{color, cell};
+      DeterministicTurn resolved = resolveTurnDeterministic(state, move);
+      ordered.moves[ordered.count++] =
+          OrderedMove{move, resolved, scoreDiff(resolved.state, player) - before};
+    }
+  }
+  std::stable_sort(ordered.moves.begin(), ordered.moves.begin() + ordered.count,
+                   [&](const OrderedMove& a, const OrderedMove& b) {
+                     if (a.immediateScore != b.immediateScore) {
+                       return maximizingNode ? a.immediateScore > b.immediateScore
+                                             : a.immediateScore < b.immediateScore;
+                     }
+                     return comesBefore(a.move, b.move);
+                   });
   return ordered;
+}
+
+struct ChanceOutcomeBuffer {
+  std::array<ChanceOutcome, kMaxChanceOutcomes> outcomes{};
+  std::size_t count = 0;
+};
+
+bool sameState(const GameState& a, const GameState& b) {
+  if (a.toMove != b.toMove || a.score != b.score || a.stock != b.stock || a.hand != b.hand ||
+      a.bag != b.bag) {
+    return false;
+  }
+  for (std::size_t i = 0; i < a.board.size(); ++i) {
+    if (a.board[i].kind != b.board[i].kind || a.board[i].color != b.board[i].color) {
+      return false;
+    }
+  }
+  return true;
+}
+
+void addChanceOutcome(ChanceOutcomeBuffer& buffer, GameState state, double probability) {
+  state.toMove = static_cast<uint8_t>(1 - state.toMove);
+  for (std::size_t i = 0; i < buffer.count; ++i) {
+    if (sameState(buffer.outcomes[i].state, state)) {
+      buffer.outcomes[i].probability += probability;
+      return;
+    }
+  }
+  if (buffer.count < buffer.outcomes.size()) {
+    buffer.outcomes[buffer.count++] = ChanceOutcome{probability, state};
+  }
+}
+
+void enumerateDrawsInBatch(const GameState& state, int batch, int drawInBatch, int drawBatches,
+                           double probability, ChanceOutcomeBuffer& buffer);
+
+void enumerateDrawBatch(const GameState& state, int batch, int drawBatches, double probability,
+                        ChanceOutcomeBuffer& buffer) {
+  if (batch >= drawBatches) {
+    addChanceOutcome(buffer, state, probability);
+    return;
+  }
+  enumerateDrawsInBatch(state, batch, 0, drawBatches, probability, buffer);
+}
+
+void enumerateDrawsInBatch(const GameState& state, int batch, int drawInBatch, int drawBatches,
+                           double probability, ChanceOutcomeBuffer& buffer) {
+  if (drawInBatch >= 3 || handCount(state, state.toMove) >= 6 || bagCount(state) == 0) {
+    enumerateDrawBatch(state, batch + 1, drawBatches, probability, buffer);
+    return;
+  }
+
+  const int player = state.toMove;
+  const int total = bagCount(state);
+  for (int tile = 0; tile < 3; ++tile) {
+    if (state.bag[tile] == 0) {
+      continue;
+    }
+    GameState next = state;
+    const double p = static_cast<double>(next.bag[tile]) / static_cast<double>(total);
+    --next.bag[tile];
+    ++next.hand[player][tile];
+    enumerateDrawsInBatch(next, batch, drawInBatch + 1, drawBatches, probability * p, buffer);
+  }
+}
+
+ChanceOutcomeBuffer enumerateDrawOutcomesFast(const GameState& preDrawState, int drawBatches) {
+  ChanceOutcomeBuffer buffer;
+  enumerateDrawBatch(preDrawState, 0, drawBatches, 1.0, buffer);
+  return buffer;
 }
 
 struct SearchContext {
@@ -99,7 +264,7 @@ struct SearchContext {
   Clock::time_point deadline{};
   bool aborted = false;
   SearchStats stats;
-  std::unordered_map<std::string, double> tt;
+  std::unordered_map<uint64_t, double> tt;
 
   bool expired() {
     if (!useDeadline || (stats.nodes & 1023ull) != 0ull) {
@@ -116,17 +281,17 @@ struct SearchContext {
 
 double expectiminimax(const GameState& state, int depth, SearchContext& ctx);
 
-double chanceValue(const GameState& state, Move move, int depth, SearchContext& ctx) {
-  const DeterministicTurn resolved = resolveTurnDeterministic(state, move);
-  const std::vector<ChanceOutcome> outcomes =
-      enumerateDrawOutcomes(resolved.state, resolved.drawBatches);
-  ctx.stats.chanceOutcomes += outcomes.size();
+double chanceValue(const DeterministicTurn& resolved, int depth, SearchContext& ctx) {
+  const ChanceOutcomeBuffer outcomes =
+      enumerateDrawOutcomesFast(resolved.state, resolved.drawBatches);
+  ctx.stats.chanceOutcomes += outcomes.count;
 
   double value = 0.0;
-  for (const ChanceOutcome& outcome : outcomes) {
+  for (std::size_t i = 0; i < outcomes.count; ++i) {
     if (ctx.aborted) {
       return 0.0;
     }
+    const ChanceOutcome& outcome = outcomes.outcomes[i];
     value += outcome.probability * expectiminimax(outcome.state, depth - 1, ctx);
   }
   return value;
@@ -144,7 +309,7 @@ double expectiminimax(const GameState& state, int depth, SearchContext& ctx) {
     return static_cast<double>(evaluate(state, ctx.maximizingPlayer));
   }
 
-  const std::string key = stateKey(state, depth, ctx.maximizingPlayer);
+  const uint64_t key = stateHash(state, depth, ctx.maximizingPlayer);
   const auto hit = ctx.tt.find(key);
   if (hit != ctx.tt.end()) {
     return hit->second;
@@ -153,9 +318,10 @@ double expectiminimax(const GameState& state, int depth, SearchContext& ctx) {
   const bool maximizingNode = state.toMove == ctx.maximizingPlayer;
   double best = maximizingNode ? -std::numeric_limits<double>::infinity()
                                : std::numeric_limits<double>::infinity();
-  const std::vector<OrderedMove> moves = orderedMoves(state, maximizingNode);
-  for (const OrderedMove& ordered : moves) {
-    const double value = chanceValue(state, ordered.move, depth, ctx);
+  const OrderedMoveList moves = orderedMoves(state, maximizingNode);
+  for (std::size_t i = 0; i < moves.count; ++i) {
+    const OrderedMove& ordered = moves.moves[i];
+    const double value = chanceValue(ordered.resolved, depth, ctx);
     if (ctx.aborted) {
       return 0.0;
     }
@@ -176,19 +342,19 @@ struct RootResult {
 };
 
 RootResult searchRoot(const GameState& state, int depth, SearchContext& ctx) {
-  const std::vector<Move> legal = legalPlacements(state);
-  if (legal.empty()) {
+  const bool maximizingNode = state.toMove == ctx.maximizingPlayer;
+  const OrderedMoveList moves = orderedMoves(state, maximizingNode);
+  if (moves.count == 0) {
     return RootResult{};
   }
 
-  const bool maximizingNode = state.toMove == ctx.maximizingPlayer;
-  const std::vector<OrderedMove> moves = orderedMoves(state, maximizingNode);
-  Move best = legal.front();
+  Move best = moves.moves[0].move;
   double bestValue = -std::numeric_limits<double>::infinity();
   bool haveBest = false;
 
-  for (const OrderedMove& ordered : moves) {
-    const double value = chanceValue(state, ordered.move, depth, ctx);
+  for (std::size_t i = 0; i < moves.count; ++i) {
+    const OrderedMove& ordered = moves.moves[i];
+    const double value = chanceValue(ordered.resolved, depth, ctx);
     if (ctx.aborted) {
       return RootResult{best, false};
     }
