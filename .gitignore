@@ -1,0 +1,9 @@
+# build artifacts
+build/
+core/build/
+*.o
+*.a
+*.out
+
+# scratch
+CODEX_SMOKE.txt
