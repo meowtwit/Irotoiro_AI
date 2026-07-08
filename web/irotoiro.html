@@ -71,6 +71,14 @@
   button.btn:hover { border-color:var(--accent); }
   button.btn:active { transform:translateY(1px); }
   button.btn:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+  .levelchip { gap:6px; }
+  .levelchip select { font-family:var(--font-body); font-size:12.5px; font-weight:600; color:var(--ink); background:transparent; border:none; outline:none; cursor:pointer; padding:0; }
+  .levelchip select:disabled { opacity:.45; cursor:default; }
+  .levelchip.adv-active { border-color:var(--accent); color:var(--ink); }
+  .adv-row { display:flex; align-items:center; gap:9px; margin:11px 0; flex-wrap:wrap; }
+  .adv-row label { font-size:13px; color:var(--ink); display:inline-flex; align-items:center; gap:6px; }
+  .adv-row input[type=number], .adv-row select { font-family:var(--font-body); font-size:13px; color:var(--ink); background:var(--sunken); border:1px solid var(--hairline); border-radius:8px; padding:6px 8px; }
+  .adv-row input[type=number] { width:88px; font-variant-numeric:tabular-nums; }
 
   /* table layout: opponent (top) / board / you (bottom) — mirrored face-off */
   .table { display:flex; flex-direction:column; gap:clamp(12px,2vw,20px); align-items:center; }
@@ -197,6 +205,21 @@
     <div class="controls">
       <span class="chip" id="turnChip"><span class="turn-dot"></span><span id="turnText">あなたの番</span></span>
       <span class="chip">袋 <b id="bagCount">20</b></span>
+      <label class="chip levelchip" id="levelChip">AI
+        <select id="levelSel" aria-label="AIの強さ（レベル）">
+          <option value="1">Lv1 · ランダム</option>
+          <option value="2">Lv2 · 貪欲</option>
+          <option value="3">Lv3</option>
+          <option value="4" selected>Lv4</option>
+          <option value="5">Lv5</option>
+          <option value="6">Lv6</option>
+          <option value="7">Lv7</option>
+          <option value="8">Lv8</option>
+          <option value="9">Lv9</option>
+          <option value="10">Lv10 · 最強</option>
+        </select>
+      </label>
+      <button class="btn" id="advBtn">詳細設定</button>
       <button class="btn" id="rulesBtn">遊び方</button>
       <button class="btn" id="themeBtn">◐ テーマ</button>
       <button class="btn" id="newBtn">新しい対局</button>
@@ -232,14 +255,36 @@
     ・<b>2個＋1個</b> → 少数の1個を、2色を混ぜた<b>マーブルタイル</b>（手札にあれば）と交換して<b>+1点</b><br>
     ・盤上で<b>タイルが3つ並ぶ</b> → 相手から1点を奪う（相手が0点なら手札を1枚奪う）<br><br>
     おはじきを置き切ったら終了。<b>点の多い方の勝ち</b>。<br>
-    <small style="color:var(--ink-soft)">※このベースでは交換・奪取は自動処理、相手はランダムBotです。</small>
+    <small style="color:var(--ink-soft)">※交換・奪取は自動処理。相手AIの強さは右上の「AI Lv」で選べます（詳細設定で思考時間/深さも指定可）。</small>
   </div>
   <div style="margin-top:18px; text-align:right;"><button class="btn" id="rulesClose">閉じる</button></div>
 </dialog>
 
+<dialog class="rules" id="advDlg">
+  <h3>詳細設定 — AIの思考</h3>
+  <div class="help">
+    ふだんは右上の「AI Lv（1〜10）」だけでOK。ここでは強さを直接指定できます。
+    <div class="adv-row"><label><input type="radio" name="aimode" value="level" checked> レベルで指定（1〜10）</label></div>
+    <div class="adv-row"><label><input type="radio" name="aimode" value="time"> 思考時間</label>
+      <input type="number" id="advTime" min="10" max="8000" step="50" value="400"> ミリ秒 / 手</div>
+    <div class="adv-row"><label><input type="radio" name="aimode" value="depth"> 探索深さ（固定）</label>
+      <input type="number" id="advDepth" min="1" max="24" step="1" value="4"> 手先</div>
+    <p style="color:var(--ink-soft);font-size:12px;margin:4px 0 0;">大きいほど強く・遅くなります（すべてブラウザ内で計算）。目安：Lv4≈180ms、Lv8≈850ms、Lv10≈1700ms。</p>
+  </div>
+  <div style="margin-top:16px; display:flex; gap:8px; justify-content:flex-end;">
+    <button class="btn" id="advApply">適用</button>
+    <button class="btn" id="advClose">閉じる</button>
+  </div>
+</dialog>
+
 <script>
+/* ===== engine.js (inlined) ===== */
 /* ---------- engine (SPEC.md 準拠 / 検証済み参照実装) ---------- */
-(function (global) {
+(function (root, factory) {
+  'use strict';
+  if (typeof module === 'object' && module.exports) module.exports = factory();
+  else root.Irotoiro = factory();
+})(typeof globalThis !== 'undefined' ? globalThis : (typeof window !== 'undefined' ? window : this), function () {
   'use strict';
   const OHA={R:0,B:1,Y:2}, TILE={P:0,G:1,O:2};
   function mixTile(a,b){ const s=a+b; if(s===1)return TILE.P; if(s===3)return TILE.G; return TILE.O; }
@@ -251,6 +296,7 @@
     return ws; })();
   const WINDOWS_THROUGH=(function(){ const m=Array.from({length:25},()=>[]);
     WINDOWS.forEach((w,wi)=>w.forEach(cell=>m[cell].push(wi))); return m; })();
+  function cloneState(s){ return {board:s.board.map(c=>c?{kind:c.kind,color:c.color}:null),stock:s.stock.map(a=>a.slice()),hand:s.hand.map(a=>a.slice()),bag:s.bag.slice(),score:s.score.slice(),toMove:s.toMove}; }
   function initialState(rng){ const s={board:new Array(25).fill(null),stock:[[4,4,4],[4,4,4]],hand:[[0,0,0],[0,0,0]],bag:[8,8,8],score:[0,0],toMove:0};
     for(let p=0;p<2;p++)for(let n=0;n<2;n++)drawOneToHand(s,p,rng); return s; }
   const handCount=(s,p)=>s.hand[p][0]+s.hand[p][1]+s.hand[p][2];
@@ -288,15 +334,420 @@
     s.toMove=opp; return ev; }
   function randomBotMove(s,rng){ const mv=legalPlacements(s); if(!mv.length)return null; return mv[Math.floor(rng()*mv.length)]; }
   function makeRng(seed){ let a=seed>>>0; return function(){ a|=0; a=(a+0x6D2B79F5)|0; let t=Math.imul(a^(a>>>15),1|a); t=(t+Math.imul(t^(t>>>7),61|t))^t; return ((t^(t>>>14))>>>0)/4294967296; }; }
-  global.Irotoiro={OHA,TILE,mixTile,initialState,legalPlacements,applyTurn,randomBotMove,makeRng,isTerminal,handCount,bagCount,stockCount};
-})(window);
+  function boardSignature(s){ let out=''; const oha='rby',tile='PGO'; for(const c of s.board){ out+=c===null?'.':(c.kind==='oha'?oha[c.color]:tile[c.color]); } return out; }
+  return {OHA,TILE,mixTile,initialState,legalPlacements,applyTurn,randomBotMove,makeRng,isTerminal,handCount,bagCount,stockCount,cloneState,WINDOWS,WINDOWS_THROUGH,drawOneToHand,boardSignature};
+});
+
+/* ===== ai.js (inlined) ===== */
+(function (root, factory) {
+  'use strict';
+  if (typeof module === 'object' && module.exports) module.exports = factory(require('./engine.js'));
+  else root.IrotoiroAI = factory(root.Irotoiro);
+})(typeof globalThis !== 'undefined' ? globalThis : (typeof window !== 'undefined' ? window : this), function (I) {
+  'use strict';
+  if (!I) throw new Error('Irotoiro engine is required before IrotoiroAI');
+
+  const VALUE_MIN = -2000000;
+  const VALUE_MAX = 2000000;
+  const LEVEL_TIME = {3:100,4:180,5:280,6:420,7:600,8:850,9:1200,10:1700};
+
+  const now = () => (typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now());
+  const yieldTurn = () => new Promise(resolve => {
+    if (typeof setTimeout !== 'undefined') setTimeout(resolve, 0);
+    else resolve();
+  });
+  const other = p => 1 - p;
+  const comesBefore = (a,b) => a.cell !== b.cell ? a.cell < b.cell : a.color < b.color;
+  const scoreDiff = (s,p) => s.score[p] - s.score[1-p];
+
+  function cellKey(c) {
+    if (c === null) return '.';
+    return c.kind === 'oha' ? 'rby'[c.color] : 'PGO'[c.color];
+  }
+
+  function stateKey(s) {
+    let key = '';
+    for (let i=0;i<25;i++) key += cellKey(s.board[i]);
+    key += '|s' + s.stock[0].join(',') + '/' + s.stock[1].join(',');
+    key += '|h' + s.hand[0].join(',') + '/' + s.hand[1].join(',');
+    key += '|b' + s.bag.join(',') + '|c' + s.score.join(',') + '|m' + s.toMove;
+    return key;
+  }
+
+  function isAllKindOrEmpty(s, w, kind) {
+    let kindCount = 0, emptyCount = 0;
+    for (const cell of w) {
+      const c = s.board[cell];
+      if (c && c.kind === kind) kindCount++;
+      else if (c === null) emptyCount++;
+      else return null;
+    }
+    return {kindCount, emptyCount};
+  }
+
+  function potentialAabBonus(s, player) {
+    let bonus = 0;
+    for (const w of I.WINDOWS) {
+      const counts = isAllKindOrEmpty(s, w, 'oha');
+      if (!counts || counts.kindCount !== 2 || counts.emptyCount !== 1) continue;
+      const colors = [0,0,0];
+      let emptyCell = -1;
+      for (const cell of w) {
+        const c = s.board[cell];
+        if (c && c.kind === 'oha') colors[c.color]++;
+        else emptyCell = cell;
+      }
+      for (let placedColor=0; placedColor<3; placedColor++) {
+        if (s.stock[player][placedColor] === 0) continue;
+        const after = colors.slice();
+        after[placedColor]++;
+        let distinct = 0, majority = -1, minority = -1;
+        for (let c=0;c<3;c++) {
+          if (after[c] > 0) distinct++;
+          if (after[c] === 2) majority = c;
+          else if (after[c] === 1) minority = c;
+        }
+        if (distinct === 2 && majority >= 0 && minority >= 0) {
+          const tile = I.mixTile(majority, minority);
+          if (s.hand[player][tile] > 0 && emptyCell >= 0) {
+            bonus += 8;
+            if (placedColor === minority) bonus += 2;
+          }
+        }
+      }
+    }
+    return bonus;
+  }
+
+  function tileReachBonus(s, player) {
+    let bonus = 0;
+    const opponent = other(player);
+    for (const w of I.WINDOWS) {
+      const counts = isAllKindOrEmpty(s, w, 'tile');
+      if (!counts || counts.kindCount !== 2 || counts.emptyCount !== 1) continue;
+      if (s.score[opponent] > 0) bonus += 6;
+      else if (I.handCount(s, opponent) > 0 && I.handCount(s, player) < 6) bonus += 3;
+      else bonus += 1;
+    }
+    return bonus;
+  }
+
+  function handUtility(s, player) {
+    let value = 2 * I.handCount(s, player);
+    for (let t=0;t<3;t++) if (s.hand[player][t] > 0) value++;
+    return value;
+  }
+
+  function evaluate(s, player) {
+    const opponent = other(player);
+    let score = 100 * (s.score[player] - s.score[opponent]);
+    score += potentialAabBonus(s, player);
+    score -= Math.trunc(potentialAabBonus(s, opponent) / 2);
+    score += tileReachBonus(s, player);
+    score -= Math.trunc(tileReachBonus(s, opponent) / 2);
+    score += handUtility(s, player);
+    score -= Math.trunc(handUtility(s, opponent) / 2);
+    return score;
+  }
+
+  function resolveTurnDeterministic(state, move) {
+    const next = I.cloneState(state);
+    const p = state.toMove, opp = 1 - p;
+    const stats = {exchanges:0, steals:0, drawEvents:0};
+    next.board[move.cell] = {kind:'oha', color:move.color};
+    next.stock[p][move.color]--;
+
+    const aabWindows = [];
+    let drawBatches = 0;
+    for (const wi of I.WINDOWS_THROUGH[move.cell]) {
+      const w = I.WINDOWS[wi];
+      const a = next.board[w[0]], b = next.board[w[1]], c = next.board[w[2]];
+      if (!a || !b || !c || a.kind !== 'oha' || b.kind !== 'oha' || c.kind !== 'oha') continue;
+      const cnt = [0,0,0];
+      cnt[a.color]++; cnt[b.color]++; cnt[c.color]++;
+      const distinct = cnt.filter(x => x > 0).length;
+      if (distinct === 1 || distinct === 3) {
+        drawBatches++;
+        continue;
+      }
+      let minority = -1, majority = -1;
+      for (let color=0;color<3;color++) {
+        if (cnt[color] === 1) minority = color;
+        else if (cnt[color] === 2) majority = color;
+      }
+      const minorityCell = w.find(cell => next.board[cell].color === minority);
+      aabWindows.push({minorityCell, mix:I.mixTile(majority, minority)});
+    }
+
+    const consumed = new Set();
+    const placedTileCells = [];
+    for (const ab of aabWindows) {
+      if (consumed.has(ab.minorityCell)) continue;
+      if (next.hand[p][ab.mix] === 0) continue;
+      next.hand[p][ab.mix]--;
+      next.score[p]++;
+      next.board[ab.minorityCell] = {kind:'tile', color:ab.mix};
+      consumed.add(ab.minorityCell);
+      placedTileCells.push(ab.minorityCell);
+      stats.exchanges++;
+    }
+
+    const seen = new Set();
+    for (const pc of placedTileCells) {
+      for (const wi of I.WINDOWS_THROUGH[pc]) {
+        if (seen.has(wi)) continue;
+        const w = I.WINDOWS[wi];
+        const a = next.board[w[0]], b = next.board[w[1]], c = next.board[w[2]];
+        if (!a || !b || !c || a.kind !== 'tile' || b.kind !== 'tile' || c.kind !== 'tile') continue;
+        seen.add(wi);
+        if (next.score[opp] > 0) {
+          next.score[opp]--;
+          next.score[p]++;
+          stats.steals++;
+        } else if (I.handCount(next, p) < 6 && I.handCount(next, opp) > 0) {
+          let tile = -1, best = -1;
+          for (let k=0;k<3;k++) if (next.hand[opp][k] > best) { best = next.hand[opp][k]; tile = k; }
+          if (tile >= 0 && next.hand[opp][tile] > 0) {
+            next.hand[opp][tile]--;
+            next.hand[p][tile]++;
+            stats.steals++;
+          }
+        }
+      }
+    }
+
+    return {state:next, drawBatches, stats};
+  }
+
+  function enumerateDrawOutcomes(preDrawState, drawBatches) {
+    const merged = new Map();
+    function addOutcome(s, prob) {
+      const done = I.cloneState(s);
+      done.toMove = 1 - done.toMove;
+      const key = stateKey(done);
+      const hit = merged.get(key);
+      if (hit) hit.prob += prob;
+      else merged.set(key, {prob, state:done});
+    }
+    function enumerateBatch(s, batch, prob) {
+      if (batch >= drawBatches) {
+        addOutcome(s, prob);
+        return;
+      }
+      enumerateDrawInBatch(s, batch, 0, prob);
+    }
+    function enumerateDrawInBatch(s, batch, drawInBatch, prob) {
+      if (drawInBatch >= 3 || I.handCount(s, s.toMove) >= 6 || I.bagCount(s) === 0) {
+        enumerateBatch(s, batch + 1, prob);
+        return;
+      }
+      const p = s.toMove;
+      const total = I.bagCount(s);
+      for (let tile=0;tile<3;tile++) {
+        if (s.bag[tile] === 0) continue;
+        const next = I.cloneState(s);
+        const chance = next.bag[tile] / total;
+        next.bag[tile]--;
+        next.hand[p][tile]++;
+        enumerateDrawInBatch(next, batch, drawInBatch + 1, prob * chance);
+      }
+    }
+    enumerateBatch(preDrawState, 0, 1);
+    return Array.from(merged.values());
+  }
+
+  function terminalValue(s, maximizingPlayer) {
+    const diff = scoreDiff(s, maximizingPlayer);
+    if (diff > 0) return 1000000 + diff * 1000;
+    if (diff < 0) return -1000000 + diff * 1000;
+    return 0;
+  }
+
+  function orderedMoves(s, maximizingNode) {
+    const player = s.toMove;
+    const before = scoreDiff(s, player);
+    return I.legalPlacements(s).map(move => {
+      const resolved = resolveTurnDeterministic(s, move);
+      return {move, resolved, immediateScore:scoreDiff(resolved.state, player) - before};
+    }).sort((a,b) => {
+      if (a.immediateScore !== b.immediateScore) return maximizingNode ? b.immediateScore - a.immediateScore : a.immediateScore - b.immediateScore;
+      return comesBefore(a.move,b.move) ? -1 : comesBefore(b.move,a.move) ? 1 : 0;
+    });
+  }
+
+  class AbortSearch extends Error {}
+
+  function makeContext(maximizingPlayer, deadline) {
+    return {
+      maximizingPlayer,
+      deadline: deadline == null ? null : deadline,
+      nodes: 0,
+      chanceOutcomes: 0,
+      check() {
+        this.nodes++;
+        if (this.deadline != null && (this.nodes & 255) === 0 && now() >= this.deadline) throw new AbortSearch();
+      }
+    };
+  }
+
+  function chanceValue(resolved, depth, ctx) {
+    if (resolved.drawBatches === 0) {
+      const next = I.cloneState(resolved.state);
+      next.toMove = 1 - next.toMove;
+      return expectiminimax(next, depth - 1, VALUE_MIN, VALUE_MAX, ctx);
+    }
+    const outcomes = enumerateDrawOutcomes(resolved.state, resolved.drawBatches);
+    ctx.chanceOutcomes += outcomes.length;
+    let value = 0;
+    for (const outcome of outcomes) {
+      value += outcome.prob * expectiminimax(outcome.state, depth - 1, VALUE_MIN, VALUE_MAX, ctx);
+    }
+    return value;
+  }
+
+  function expectiminimax(s, depth, alpha, beta, ctx) {
+    ctx.check();
+    if (I.isTerminal(s)) return terminalValue(s, ctx.maximizingPlayer);
+    if (depth <= 0) return evaluate(s, ctx.maximizingPlayer);
+
+    const maximizingNode = s.toMove === ctx.maximizingPlayer;
+    const moves = orderedMoves(s, maximizingNode);
+    if (maximizingNode) {
+      let best = VALUE_MIN;
+      for (const ordered of moves) {
+        const value = chanceValue(ordered.resolved, depth, ctx);
+        if (value > best) best = value;
+        if (best > alpha) alpha = best;
+        if (alpha >= beta) break;
+      }
+      return best;
+    }
+    let best = VALUE_MAX;
+    for (const ordered of moves) {
+      const value = chanceValue(ordered.resolved, depth, ctx);
+      if (value < best) best = value;
+      if (best < beta) beta = best;
+      if (alpha >= beta) break;
+    }
+    return best;
+  }
+
+  async function searchRootDepth(state, depth, deadline) {
+    const ctx = makeContext(state.toMove, deadline);
+    let moves = orderedMoves(state, true);
+    if (!moves.length) return {move:null, value:0, completed:true, stats:ctx};
+    let best = moves[0].move;
+    let bestValue = VALUE_MIN;
+    let haveBest = false;
+    let alpha = VALUE_MIN;
+    const beta = VALUE_MAX;
+    for (const ordered of moves) {
+      if (deadline != null && now() >= deadline) throw new AbortSearch();
+      const value = chanceValue(ordered.resolved, depth, ctx);
+      if (!haveBest || value > bestValue || (Math.abs(value - bestValue) <= 1e-12 && comesBefore(ordered.move, best))) {
+        bestValue = value;
+        best = ordered.move;
+        haveBest = true;
+      }
+      if (bestValue > alpha) alpha = bestValue;
+      await yieldTurn();
+    }
+    return {move:best, value:bestValue, completed:haveBest, stats:ctx};
+  }
+
+  function randomMove(state, rngOrMathRandom) {
+    const rng = rngOrMathRandom || Math.random;
+    const moves = I.legalPlacements(state);
+    if (!moves.length) return null;
+    const r = typeof rng === 'function' ? rng() : rng.random();
+    return moves[Math.floor(r * moves.length)];
+  }
+
+  function greedyMove(state) {
+    const moves = I.legalPlacements(state);
+    if (!moves.length) return null;
+    const player = state.toMove;
+    let best = moves[0], bestScore = -1000000000;
+    for (const move of moves) {
+      const resolved = resolveTurnDeterministic(state, move);
+      let next;
+      if (resolved.drawBatches === 0) {
+        next = I.cloneState(resolved.state);
+        next.toMove = 1 - next.toMove;
+      } else {
+        const outcomes = enumerateDrawOutcomes(resolved.state, resolved.drawBatches);
+        let score = 0;
+        for (const outcome of outcomes) score += outcome.prob * evaluate(outcome.state, player);
+        if (score > bestScore || (Math.abs(score - bestScore) <= 1e-12 && comesBefore(move, best))) {
+          bestScore = score;
+          best = move;
+        }
+        continue;
+      }
+      const score = evaluate(next, player);
+      if (score > bestScore || (score === bestScore && comesBefore(move, best))) {
+        bestScore = score;
+        best = move;
+      }
+    }
+    return best;
+  }
+
+  async function bestMove(state, opts) {
+    const options = opts || {level:4};
+    const stateCopy = I.cloneState(state);
+    const legal = I.legalPlacements(stateCopy);
+    if (!legal.length) return null;
+
+    if (options.level === 1) return randomMove(stateCopy, Math.random);
+    if (options.level === 2) return greedyMove(stateCopy);
+    if (options.depth != null) {
+      const result = await searchRootDepth(stateCopy, Math.max(1, options.depth), null);
+      return result.move || legal[0];
+    }
+
+    let timeMs;
+    if (options.timeMs != null) timeMs = Math.max(1, options.timeMs);
+    else {
+      const level = options.level == null ? 4 : options.level;
+      if (level <= 1) return randomMove(stateCopy, Math.random);
+      if (level === 2) return greedyMove(stateCopy);
+      timeMs = LEVEL_TIME[level] || LEVEL_TIME[4];
+    }
+
+    const deadline = now() + timeMs;
+    let best = greedyMove(stateCopy) || legal[0];
+    const maxDepth = Math.max(1, I.stockCount(stateCopy,0) + I.stockCount(stateCopy,1));
+    for (let depth=1; depth<=maxDepth; depth++) {
+      if (now() >= deadline) break;
+      try {
+        const result = await searchRootDepth(stateCopy, depth, deadline);
+        if (result.completed && result.move) best = result.move;
+      } catch (err) {
+        if (err instanceof AbortSearch) break;
+        throw err;
+      }
+      await yieldTurn();
+    }
+    return {color:best.color, cell:best.cell};
+  }
+
+  return {evaluate, resolveTurnDeterministic, enumerateDrawOutcomes, bestMove, randomMove, greedyMove};
+});
 
 /* ---------- UI ---------- */
 (function(){
   const I=window.Irotoiro;
+  const AI=window.IrotoiroAI;
   const OHA_CLASS=['red','blue','yellow'], OHA_NAME=['赤','青','黄'];
   const TILE_CLASS=['pur','grn','org'], TILE_NAME=['紫','緑','橙'];
   const HUMAN=0, BOT=1;
+
+  // AI difficulty: mode = 'level' | 'time' | 'depth'
+  let aiMode='level', aiLevel=4, aiTimeMs=400, aiDepth=4;
+  const clock=()=> (typeof performance!=='undefined'&&performance.now)?performance.now():Date.now();
+  function difficultyLabel(){ return aiMode==='time'?(aiTimeMs+'ms') : aiMode==='depth'?('深さ'+aiDepth) : ('Lv'+aiLevel); }
+  function aiOpts(){ return aiMode==='time'?{timeMs:aiTimeMs} : aiMode==='depth'?{depth:aiDepth} : {level:aiLevel}; }
 
   let state, rng, selected=null, busy=false, captured=[[],[]];
   const boardEl=document.getElementById('board');
@@ -330,7 +781,7 @@
 
   function renderChips(){
     document.getElementById('bagCount').textContent=I.bagCount(state);
-    document.getElementById('turnText').textContent = I.isTerminal(state)?'対局終了':(state.toMove===HUMAN?'あなたの番':'Bot の番');
+    document.getElementById('turnText').textContent = I.isTerminal(state)?'対局終了':(state.toMove===HUMAN?'あなたの番':'AI の番');
   }
   function updateActivePanel(){
     document.getElementById('panel0').classList.toggle('active', !I.isTerminal(state)&&state.toMove===HUMAN);
@@ -354,7 +805,7 @@
     }).join('');
     panel.innerHTML=`
       <div class="player-head">
-        <span class="who">${isHuman?'あなた':'Bot'}<small>${isHuman?'YOU':'RANDOM'}</small></span>
+        <span class="who">${isHuman?'あなた':'AI'}<small>${isHuman?'YOU':difficultyLabel()}</small></span>
         <span class="score-total" id="score${p}"><span class="lbl">得点</span>${state.score[p]}</span>
       </div>
       <div class="trays">
@@ -386,9 +837,12 @@
   async function botTurn(){
     if(I.isTerminal(state))return;
     busy=true; renderPanels(); renderChips(); updateActivePanel();
-    setStatus('Bot が考えています…');
-    await wait(480);
-    const move=I.randomBotMove(state,rng);
+    setStatus(`AI が考えています…（${difficultyLabel()}）`);
+    const t0=clock();
+    let move=null;
+    try { move = await AI.bestMove(state, aiOpts()); } catch(e){ move=null; }
+    if(!move) move = I.randomBotMove(state, rng);
+    const dt=clock()-t0; if(dt<300) await wait(300-dt);   // 速いレベルでも一拍おく
     await doTurn(move);
     if(I.isTerminal(state)) endGame();
     else setStatus('あなたの番です。おはじきの色を選んでください。');
@@ -400,16 +854,16 @@
     const ev=I.applyTurn(state,move,rng);   // mutates to final state
     for(const e of ev){
       if(e.type==='place'){ showPiece(e.cell,e.piece,'drop'); cellEls[e.cell].classList.add('land');
-        setStatus(`${mover===HUMAN?'あなた':'Bot'}が <b>${OHA_NAME[e.piece.color]}</b> を置きました。`);
+        setStatus(`${mover===HUMAN?'あなた':'AI'}が <b>${OHA_NAME[e.piece.color]}</b> を置きました。`);
         await wait(200); cellEls[e.cell].classList.remove('land'); }
       else if(e.type==='line-oha'){ e.window.forEach((c,k)=>setTimeout(()=>cellEls[c].classList.add('pulse'),k*55));
         await wait(360); e.window.forEach(c=>cellEls[c].classList.remove('pulse')); }
       else if(e.type==='exchange'){ showPiece(e.cell,{kind:'tile',color:e.tile},'flip'); captured[e.player].push(e.scoredColor);
         renderPanel(e.player); popScore(e.player);
-        setStatus(`3つ並び！ <b>${OHA_NAME[e.scoredColor]}</b> を <b>${TILE_NAME[e.tile]}</b> タイルと交換 → ${e.player===HUMAN?'あなた':'Bot'} +1点`);
+        setStatus(`3つ並び！ <b>${OHA_NAME[e.scoredColor]}</b> を <b>${TILE_NAME[e.tile]}</b> タイルと交換 → ${e.player===HUMAN?'あなた':'AI'} +1点`);
         await wait(300); }
       else if(e.type==='steal-point'){ moveCaptured(e.from,e.to); renderPanels(); popScore(e.to); flashPanel(e.to);
-        setStatus(`タイル3つ並び！ ${e.to===HUMAN?'あなた':'Bot'} が相手から <b>1点</b> を奪いました。`); await wait(320); }
+        setStatus(`タイル3つ並び！ ${e.to===HUMAN?'あなた':'AI'} が相手から <b>1点</b> を奪いました。`); await wait(320); }
       else if(e.type==='steal-tile'){ renderPanels(); flashPanel(e.to);
         setStatus(`タイル3つ並び！ 相手は0点 → <b>${TILE_NAME[e.tile]}</b> タイルを奪いました。`); await wait(320); }
       else if(e.type==='draw'){ renderPanel(e.player);
@@ -428,9 +882,9 @@
     const s0=state.score[HUMAN], s1=state.score[BOT];
     const t=document.getElementById('ovTitle'), b=document.getElementById('ovBody');
     if(s0>s1) t.textContent='あなたの勝ち！';
-    else if(s1>s0) t.textContent='Bot の勝ち';
+    else if(s1>s0) t.textContent='AI の勝ち';
     else t.textContent='引き分け';
-    b.innerHTML=`あなた <b>${s0}</b> — <b>${s1}</b> Bot`;
+    b.innerHTML=`あなた <b>${s0}</b> — <b>${s1}</b> AI（${difficultyLabel()}）`;
     setStatus('対局終了。');
     document.getElementById('overlay').classList.add('show');
   }
@@ -447,6 +901,33 @@
   document.getElementById('rulesBtn').addEventListener('click',()=>dlg.showModal());
   document.getElementById('rulesClose').addEventListener('click',()=>dlg.close());
 
+  // difficulty controls
+  const levelSel=document.getElementById('levelSel');
+  const levelChip=document.getElementById('levelChip');
+  const advDlg=document.getElementById('advDlg');
+  function syncDifficultyUI(){
+    levelSel.disabled = aiMode!=='level';
+    levelChip.classList.toggle('adv-active', aiMode!=='level');
+    if(!busy && state) renderPanel(BOT);
+  }
+  levelSel.addEventListener('change',()=>{ aiLevel=+levelSel.value; aiMode='level';
+    const r=advDlg.querySelector('input[name="aimode"][value="level"]'); if(r) r.checked=true; syncDifficultyUI(); });
+  document.getElementById('advBtn').addEventListener('click',()=>{
+    advDlg.querySelector(`input[name="aimode"][value="${aiMode}"]`).checked=true;
+    document.getElementById('advTime').value=aiTimeMs;
+    document.getElementById('advDepth').value=aiDepth;
+    advDlg.showModal();
+  });
+  document.getElementById('advApply').addEventListener('click',()=>{
+    const mode=advDlg.querySelector('input[name="aimode"]:checked').value;
+    aiTimeMs=Math.max(10,Math.min(8000,parseInt(document.getElementById('advTime').value,10)||400));
+    aiDepth=Math.max(1,Math.min(24,parseInt(document.getElementById('advDepth').value,10)||4));
+    aiMode=mode; if(mode==='level') aiLevel=+levelSel.value;
+    syncDifficultyUI(); advDlg.close();
+  });
+  document.getElementById('advClose').addEventListener('click',()=>advDlg.close());
+
   newGame();
+  syncDifficultyUI();
 })();
 </script>
