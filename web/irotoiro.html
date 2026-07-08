@@ -1,0 +1,452 @@
+<title>イロトイロ</title>
+<style>
+  /* ============================================================
+     イロトイロ — playable base (Human vs Random Bot)
+     Design system blended from Sagrada / Azul / Tokaido /
+     Shobu / Reef / Hanamikoji (see SPEC.md, research notes).
+     ============================================================ */
+
+  :root {
+    /* LIGHT — cool washi / stone */
+    --ground:#E4E6E1; --surface:#F0F1EC; --sunken:#D8DBD4;
+    --hairline:#C7CBC1; --ink:#22262A; --ink-soft:#5C6169;
+    --well-hi:rgba(255,255,255,.55); --well-lo:rgba(0,0,0,.28);
+    --panel-shadow:0 1px 2px rgba(0,0,0,.06),0 8px 24px rgba(30,40,30,.10);
+    --accent:#7B3FC4;
+
+    /* Ohajiki jewels (hi / base / lo) — theme independent */
+    --red-hi:#FF9AA2; --red:#DC2648; --red-lo:#6E0C22;
+    --blu-hi:#7FC4FF; --blu:#1D5FD6; --blu-lo:#0A2A6E;
+    --yel-hi:#FFE7A6; --yel:#F2AC1B; --yel-lo:#8F6205;
+    /* Marble tiles (light vein / base / deep vein) */
+    --pur-hi:#B98CE8; --pur:#7B3FC4; --pur-lo:#3A1668;
+    --grn-hi:#7FD9A6; --grn:#189C63; --grn-lo:#0A4630;
+    --org-hi:#FFB870; --org:#E8701C; --org-lo:#7A3105;
+
+    --font-display:"Hiragino Mincho ProN","Yu Mincho",YuMincho,"Noto Serif JP","Songti SC","Hoefler Text","Iowan Old Style",Georgia,serif;
+    --font-body:"Hiragino Sans","Hiragino Kaku Gothic ProN","Yu Gothic",YuGothic,"Noto Sans JP",Meiryo,system-ui,-apple-system,"Segoe UI",sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ground:#15181D; --surface:#1F242B; --sunken:#0F1216;
+      --hairline:#333B44; --ink:#E7E9E5; --ink-soft:#99A1A9;
+      --well-hi:rgba(255,255,255,.06); --well-lo:rgba(0,0,0,.55);
+      --panel-shadow:0 1px 2px rgba(0,0,0,.4),0 10px 30px rgba(0,0,0,.45);
+      --accent:#B98CE8;
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground:#15181D; --surface:#1F242B; --sunken:#0F1216;
+    --hairline:#333B44; --ink:#E7E9E5; --ink-soft:#99A1A9;
+    --well-hi:rgba(255,255,255,.06); --well-lo:rgba(0,0,0,.55);
+    --panel-shadow:0 1px 2px rgba(0,0,0,.4),0 10px 30px rgba(0,0,0,.45);
+    --accent:#B98CE8;
+  }
+  :root[data-theme="light"] {
+    --ground:#E4E6E1; --surface:#F0F1EC; --sunken:#D8DBD4;
+    --hairline:#C7CBC1; --ink:#22262A; --ink-soft:#5C6169;
+    --well-hi:rgba(255,255,255,.55); --well-lo:rgba(0,0,0,.28);
+    --panel-shadow:0 1px 2px rgba(0,0,0,.06),0 8px 24px rgba(30,40,30,.10);
+    --accent:#7B3FC4;
+  }
+
+  * { box-sizing:border-box; }
+  body {
+    margin:0; background:var(--ground); color:var(--ink);
+    font-family:var(--font-body); line-height:1.5;
+    -webkit-font-smoothing:antialiased; letter-spacing:.01em;
+    background-image:repeating-linear-gradient(90deg,rgba(120,130,120,.020) 0 2px,transparent 2px 6px);
+  }
+  .app { max-width:1040px; margin:0 auto; padding:clamp(16px,3vw,34px) clamp(14px,3vw,28px) 56px; }
+
+  /* topbar */
+  .topbar { display:flex; align-items:flex-end; justify-content:space-between; gap:16px; flex-wrap:wrap; margin-bottom:clamp(14px,2.4vw,26px); }
+  .brand h1 { font-family:var(--font-display); font-weight:600; letter-spacing:.10em; font-size:clamp(28px,5vw,44px); margin:0; }
+  .brand .tagline { margin:.15em 0 0; color:var(--ink-soft); font-size:13px; letter-spacing:.14em; }
+  .controls { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+  .chip { font-size:12px; letter-spacing:.06em; color:var(--ink-soft); background:var(--surface); border:1px solid var(--hairline); border-radius:999px; padding:6px 13px; display:inline-flex; align-items:center; gap:7px; }
+  .chip b { color:var(--ink); font-variant-numeric:tabular-nums; font-weight:600; }
+  .chip .turn-dot { width:8px; height:8px; border-radius:50%; background:var(--accent); box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 22%,transparent); }
+  button.btn { font-family:var(--font-body); font-size:12.5px; letter-spacing:.05em; color:var(--ink); background:var(--surface); border:1px solid var(--hairline); border-radius:999px; padding:7px 15px; cursor:pointer; transition:background .18s,border-color .18s,transform .06s; }
+  button.btn:hover { border-color:var(--accent); }
+  button.btn:active { transform:translateY(1px); }
+  button.btn:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+
+  /* table layout: opponent (top) / board / you (bottom) — mirrored face-off */
+  .table { display:flex; flex-direction:column; gap:clamp(12px,2vw,20px); align-items:center; }
+
+  /* player panel = a set of trays, same well material as the board */
+  .player { width:100%; max-width:520px; background:var(--surface); border:1px solid var(--hairline); border-radius:14px; padding:12px 14px; box-shadow:var(--panel-shadow); transition:box-shadow .3s,border-color .3s; }
+  .player.active { border-color:var(--accent); box-shadow:var(--panel-shadow),0 0 0 2px color-mix(in srgb,var(--accent) 30%,transparent); }
+  .player-head { display:flex; align-items:baseline; justify-content:space-between; margin-bottom:10px; }
+  .player-head .who { font-family:var(--font-display); font-size:16px; letter-spacing:.08em; }
+  .player-head .who small { font-family:var(--font-body); font-size:11px; letter-spacing:.1em; color:var(--ink-soft); margin-left:8px; }
+  .score-total { font-family:var(--font-display); font-size:30px; line-height:1; font-variant-numeric:oldstyle-nums; }
+  .score-total .lbl { font-family:var(--font-body); font-size:11px; letter-spacing:.14em; color:var(--ink-soft); margin-right:8px; vertical-align:middle; }
+  .score-total.pop { animation:pop .45s cubic-bezier(.2,.85,.25,1); }
+
+  .trays { display:grid; grid-template-columns:auto 1fr auto; gap:10px; align-items:stretch; }
+  @media (max-width:520px){ .trays { grid-template-columns:1fr; } }
+  .tray { background:var(--sunken); border-radius:10px; padding:8px 9px; box-shadow:inset 1px 1px 4px var(--well-lo),inset -1px -1px 3px var(--well-hi); }
+  .tray-label { font-size:10px; letter-spacing:.16em; color:var(--ink-soft); margin-bottom:6px; text-transform:uppercase; }
+  .captured { display:flex; flex-wrap:wrap; gap:4px; min-width:64px; max-width:118px; align-content:flex-start; min-height:24px; }
+  .captured .gem { width:15px; height:15px; }
+  .hand { display:flex; flex-wrap:wrap; gap:6px; min-height:24px; align-content:center; }
+  .stock { display:flex; gap:8px; }
+
+  /* stock color control */
+  .stockcol { display:flex; flex-direction:column; align-items:center; gap:3px; }
+  .stockcol .cnt { font-size:11px; color:var(--ink-soft); font-variant-numeric:tabular-nums; }
+  .stockbtn { border:none; background:none; padding:3px; border-radius:50%; cursor:pointer; line-height:0; transition:transform .1s; }
+  .stockbtn:disabled { cursor:default; opacity:.28; }
+  .stockbtn:not(:disabled):hover { transform:translateY(-2px); }
+  .stockbtn.sel { box-shadow:0 0 0 2px var(--surface),0 0 0 4px var(--accent); }
+  .stockbtn:focus-visible { outline:2px solid var(--accent); outline-offset:3px; }
+  .stock.readonly .stockbtn { cursor:default; }
+
+  /* board */
+  .board-wrap { display:flex; flex-direction:column; align-items:center; gap:10px; }
+  .board { width:min(90vw,452px); aspect-ratio:1; padding:10px; border-radius:12px;
+    background:var(--surface); border:1px solid var(--hairline);
+    box-shadow:var(--panel-shadow), inset 0 1px 0 var(--well-hi);
+    display:grid; grid-template-columns:repeat(5,1fr); grid-template-rows:repeat(5,1fr); gap:7px; }
+  .cell { background:var(--sunken); border-radius:8px; display:grid; place-items:center;
+    box-shadow:inset 2px 2px 5px var(--well-lo), inset -2px -2px 4px var(--well-hi);
+    position:relative; transition:box-shadow .18s; min-width:0; min-height:0; }
+  .cell.placeable { cursor:pointer; }
+  .cell.placeable::after { content:""; position:absolute; inset:22%; border-radius:50%;
+    background:radial-gradient(circle,color-mix(in srgb,var(--accent) 40%,transparent),transparent 70%); opacity:0; transition:opacity .18s; }
+  .cell.placeable:hover::after { opacity:.55; }
+  .cell.land { box-shadow:inset 3px 3px 7px var(--well-lo), inset -1px -1px 3px var(--well-hi); }
+  .cell.pulse .ohajiki, .cell.pulse .tile { animation:pulse .5s ease-out; }
+
+  .status { font-size:13px; color:var(--ink-soft); letter-spacing:.02em; min-height:20px; text-align:center; }
+  .status b { color:var(--ink); font-weight:600; }
+
+  /* ---- pieces ---- */
+  .ohajiki { width:76%; aspect-ratio:1/.94; border-radius:50%; position:relative; isolation:isolate;
+    background:radial-gradient(circle at 38% 32%, var(--hi) 0%, var(--base) 52%, var(--lo) 100%);
+    box-shadow:inset -2px -3px 6px rgba(0,0,0,.45), inset 2px 3px 5px rgba(255,255,255,.55), 0 3px 6px rgba(0,0,0,.32); }
+  .ohajiki::before { content:""; position:absolute; inset:0; border-radius:inherit;
+    background:radial-gradient(circle at 30% 24%, rgba(255,255,255,.95) 0%, transparent 34%); filter:blur(.5px);
+    animation:catchlight 7s ease-in-out infinite; }
+  .ohajiki.red{ --hi:var(--red-hi); --base:var(--red); --lo:var(--red-lo);}
+  .ohajiki.blue{ --hi:var(--blu-hi); --base:var(--blu); --lo:var(--blu-lo);}
+  .ohajiki.yellow{ --hi:var(--yel-hi); --base:var(--yel); --lo:var(--yel-lo);}
+  .gem { border-radius:50%; position:relative; background:radial-gradient(circle at 36% 30%,var(--hi),var(--base) 55%,var(--lo)); box-shadow:inset -1px -1px 2px rgba(0,0,0,.4),inset 1px 1px 2px rgba(255,255,255,.5); }
+  .gem.red{ --hi:var(--red-hi); --base:var(--red); --lo:var(--red-lo);}
+  .gem.blue{ --hi:var(--blu-hi); --base:var(--blu); --lo:var(--blu-lo);}
+  .gem.yellow{ --hi:var(--yel-hi); --base:var(--yel); --lo:var(--yel-lo);}
+
+  .tile { width:74%; aspect-ratio:1; border-radius:7px; position:relative; overflow:hidden; background:var(--base);
+    box-shadow:inset 0 2px 3px rgba(255,255,255,.4), inset 0 -3px 5px rgba(0,0,0,.4), 0 3px 0 var(--lo), 0 6px 11px rgba(0,0,0,.32); }
+  .tile::before { content:""; position:absolute; inset:-40%;
+    background:
+      radial-gradient(circle at 30% 30%, var(--hi) 0 22%, transparent 55%),
+      radial-gradient(circle at 72% 62%, var(--lo) 0 26%, transparent 60%),
+      conic-gradient(from 0deg, transparent, var(--hi) 25%, transparent 50%, var(--lo) 75%, transparent);
+    filter:blur(6px); mix-blend-mode:soft-light; opacity:.92; animation:swirl 24s linear infinite; }
+  .tile::after { content:""; position:absolute; inset:0;
+    background:linear-gradient(120deg, transparent 40%, rgba(255,255,255,.34) 50%, transparent 60%);
+    animation:glint 8s ease-in-out infinite; }
+  .tile.pur{ --hi:var(--pur-hi); --base:var(--pur); --lo:var(--pur-lo);}
+  .tile.grn{ --hi:var(--grn-hi); --base:var(--grn); --lo:var(--grn-lo);}
+  .tile.org{ --hi:var(--org-hi); --base:var(--org); --lo:var(--org-lo);}
+  .hand .tile { width:26px; }
+  .stockbtn .ohajiki { width:30px; }
+
+  @keyframes swirl { to { transform:rotate(360deg) scale(1.05); } }
+  @keyframes glint { 0%,84%,100%{ transform:translateX(-130%);} 91%{ transform:translateX(130%);} }
+  @keyframes catchlight { 0%,100%{ background-position:0 0;} 50%{ background-position:6% 5%;} }
+  @keyframes drop { 0%{ transform:translateY(-16px) scale(1.06); opacity:0;} 60%{ opacity:1;} 100%{ transform:none;} }
+  @keyframes flip { 0%{ transform:rotateY(85deg) scale(.9);} 100%{ transform:none;} }
+  @keyframes pulse { 0%{ transform:scale(1); filter:brightness(1);} 45%{ transform:scale(1.11); filter:brightness(1.28);} 100%{ transform:scale(1); filter:brightness(1);} }
+  @keyframes pop { 0%{ transform:scale(1);} 40%{ transform:scale(1.28);} 100%{ transform:scale(1);} }
+  @keyframes appear { from{ transform:scale(.5); opacity:0;} to{ transform:none; opacity:1;} }
+  .drop { animation:drop .24s cubic-bezier(.2,.85,.25,1); }
+  .flip { animation:flip .32s ease-out; }
+  .appear { animation:appear .3s ease-out; }
+  .flash { animation:flash .5s ease-out; }
+  @keyframes flash { 0%{ box-shadow:var(--panel-shadow),0 0 0 2px var(--accent);} 100%{ box-shadow:var(--panel-shadow);} }
+
+  /* overlay */
+  .overlay { position:fixed; inset:0; display:none; place-items:center; background:color-mix(in srgb,var(--ground) 72%,transparent); backdrop-filter:blur(6px); z-index:20; }
+  .overlay.show { display:grid; animation:appear .3s ease-out; }
+  .card { background:var(--surface); border:1px solid var(--hairline); border-radius:16px; padding:30px 36px; text-align:center; box-shadow:var(--panel-shadow); max-width:340px; }
+  .card h2 { font-family:var(--font-display); font-weight:600; letter-spacing:.08em; margin:0 0 6px; font-size:26px; }
+  .card p { color:var(--ink-soft); margin:0 0 20px; font-variant-numeric:tabular-nums; }
+
+  /* help */
+  .help { font-size:13px; color:var(--ink-soft); line-height:1.7; }
+  .help b { color:var(--ink); }
+  dialog.rules { border:1px solid var(--hairline); border-radius:16px; background:var(--surface); color:var(--ink); max-width:440px; padding:26px 28px; box-shadow:var(--panel-shadow); }
+  dialog.rules::backdrop { background:color-mix(in srgb,var(--ground) 65%,transparent); backdrop-filter:blur(4px); }
+  dialog.rules h3 { font-family:var(--font-display); letter-spacing:.06em; margin:0 0 12px; }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { animation-duration:.001s !important; animation-iteration-count:1 !important; }
+  }
+</style>
+
+<div class="app">
+  <header class="topbar">
+    <div class="brand">
+      <h1>イロトイロ</h1>
+      <p class="tagline">色を混ぜて、点を奪う。</p>
+    </div>
+    <div class="controls">
+      <span class="chip" id="turnChip"><span class="turn-dot"></span><span id="turnText">あなたの番</span></span>
+      <span class="chip">袋 <b id="bagCount">20</b></span>
+      <button class="btn" id="rulesBtn">遊び方</button>
+      <button class="btn" id="themeBtn">◐ テーマ</button>
+      <button class="btn" id="newBtn">新しい対局</button>
+    </div>
+  </header>
+
+  <main class="table">
+    <section class="player" id="panel1" data-player="1"></section>
+
+    <div class="board-wrap">
+      <div class="board" id="board" aria-label="5x5 の盤面"></div>
+      <div class="status" id="status">おはじきの色を選んで、空いているマスに置きましょう。</div>
+    </div>
+
+    <section class="player" id="panel0" data-player="0"></section>
+  </main>
+</div>
+
+<div class="overlay" id="overlay">
+  <div class="card">
+    <h2 id="ovTitle">対局終了</h2>
+    <p id="ovBody"></p>
+    <button class="btn" id="ovAgain">もう一度</button>
+  </div>
+</div>
+
+<dialog class="rules" id="rulesDlg">
+  <h3>イロトイロ の遊び方</h3>
+  <div class="help">
+    自分の番に、手持ちの<b>おはじき（赤・青・黄）</b>を1つ、空きマスに置きます。<br><br>
+    縦・横・斜めに<b>3つ並ぶ</b>と…<br>
+    ・<b>全部同じ / 全部違う色</b> → 袋からタイルを引く<br>
+    ・<b>2個＋1個</b> → 少数の1個を、2色を混ぜた<b>マーブルタイル</b>（手札にあれば）と交換して<b>+1点</b><br>
+    ・盤上で<b>タイルが3つ並ぶ</b> → 相手から1点を奪う（相手が0点なら手札を1枚奪う）<br><br>
+    おはじきを置き切ったら終了。<b>点の多い方の勝ち</b>。<br>
+    <small style="color:var(--ink-soft)">※このベースでは交換・奪取は自動処理、相手はランダムBotです。</small>
+  </div>
+  <div style="margin-top:18px; text-align:right;"><button class="btn" id="rulesClose">閉じる</button></div>
+</dialog>
+
+<script>
+/* ---------- engine (SPEC.md 準拠 / 検証済み参照実装) ---------- */
+(function (global) {
+  'use strict';
+  const OHA={R:0,B:1,Y:2}, TILE={P:0,G:1,O:2};
+  function mixTile(a,b){ const s=a+b; if(s===1)return TILE.P; if(s===3)return TILE.G; return TILE.O; }
+  const WINDOWS=(function(){ const ws=[],idx=(r,c)=>r*5+c;
+    for(let r=0;r<5;r++)for(let c=0;c<3;c++)ws.push([idx(r,c),idx(r,c+1),idx(r,c+2)]);
+    for(let c=0;c<5;c++)for(let r=0;r<3;r++)ws.push([idx(r,c),idx(r+1,c),idx(r+2,c)]);
+    for(let r=0;r<3;r++)for(let c=0;c<3;c++)ws.push([idx(r,c),idx(r+1,c+1),idx(r+2,c+2)]);
+    for(let r=0;r<3;r++)for(let c=2;c<5;c++)ws.push([idx(r,c),idx(r+1,c-1),idx(r+2,c-2)]);
+    return ws; })();
+  const WINDOWS_THROUGH=(function(){ const m=Array.from({length:25},()=>[]);
+    WINDOWS.forEach((w,wi)=>w.forEach(cell=>m[cell].push(wi))); return m; })();
+  function initialState(rng){ const s={board:new Array(25).fill(null),stock:[[4,4,4],[4,4,4]],hand:[[0,0,0],[0,0,0]],bag:[8,8,8],score:[0,0],toMove:0};
+    for(let p=0;p<2;p++)for(let n=0;n<2;n++)drawOneToHand(s,p,rng); return s; }
+  const handCount=(s,p)=>s.hand[p][0]+s.hand[p][1]+s.hand[p][2];
+  const bagCount=s=>s.bag[0]+s.bag[1]+s.bag[2];
+  const stockCount=(s,p)=>s.stock[p][0]+s.stock[p][1]+s.stock[p][2];
+  const isTerminal=s=>stockCount(s,0)===0&&stockCount(s,1)===0;
+  function drawOneToHand(s,p,rng){ if(handCount(s,p)>=6)return -1; const total=bagCount(s); if(total===0)return -1;
+    let r=Math.floor(rng()*total); for(let t=0;t<3;t++){ if(r<s.bag[t]){ s.bag[t]--; s.hand[p][t]++; return t;} r-=s.bag[t]; } return -1; }
+  function legalPlacements(s){ const p=s.toMove,mv=[]; for(let cell=0;cell<25;cell++){ if(s.board[cell]!==null)continue;
+    for(let c=0;c<3;c++) if(s.stock[p][c]>0) mv.push({color:c,cell}); } return mv; }
+  function applyTurn(s,move,rng){ const p=s.toMove,opp=1-p,ev=[];
+    s.board[move.cell]={kind:'oha',color:move.color}; s.stock[p][move.color]--;
+    ev.push({type:'place',cell:move.cell,player:p,piece:{kind:'oha',color:move.color}});
+    const drawWindows=[],aabWindows=[];
+    for(const wi of WINDOWS_THROUGH[move.cell]){ const w=WINDOWS[wi]; const a=s.board[w[0]],b=s.board[w[1]],c=s.board[w[2]];
+      if(!a||!b||!c||a.kind!=='oha'||b.kind!=='oha'||c.kind!=='oha')continue;
+      const cnt=[0,0,0]; cnt[a.color]++;cnt[b.color]++;cnt[c.color]++; const distinct=cnt.filter(x=>x>0).length;
+      if(distinct===1||distinct===3){ drawWindows.push(wi); ev.push({type:'line-oha',window:w.slice(),pattern:distinct===1?'same':'diff'}); }
+      else { let mn=-1,mj=-1; for(let col=0;col<3;col++){ if(cnt[col]===1)mn=col; else if(cnt[col]===2)mj=col; }
+        const mc=w.find(cell=>s.board[cell].color===mn); aabWindows.push({minorityCell:mc,mixTile:mixTile(mj,mn),minorityColor:mn});
+        ev.push({type:'line-oha',window:w.slice(),pattern:'pair'}); } }
+    const consumed=new Set(),placedTileCells=[];
+    for(const ab of aabWindows){ if(consumed.has(ab.minorityCell))continue; if(s.hand[p][ab.mixTile]<=0)continue;
+      s.hand[p][ab.mixTile]--; s.score[p]++; s.board[ab.minorityCell]={kind:'tile',color:ab.mixTile};
+      consumed.add(ab.minorityCell); placedTileCells.push(ab.minorityCell);
+      ev.push({type:'exchange',cell:ab.minorityCell,player:p,scoredColor:ab.minorityColor,tile:ab.mixTile}); }
+    const seen=new Set();
+    for(const pc of placedTileCells){ for(const wi of WINDOWS_THROUGH[pc]){ if(seen.has(wi))continue; const w=WINDOWS[wi];
+      const a=s.board[w[0]],b=s.board[w[1]],c=s.board[w[2]];
+      if(!a||!b||!c||a.kind!=='tile'||b.kind!=='tile'||c.kind!=='tile')continue; seen.add(wi);
+      if(s.score[opp]>0){ s.score[opp]--; s.score[p]++; ev.push({type:'steal-point',window:w.slice(),from:opp,to:p}); }
+      else if(handCount(s,p)<6&&handCount(s,opp)>0){ let t=-1,best=-1; for(let k=0;k<3;k++) if(s.hand[opp][k]>best){best=s.hand[opp][k];t=k;}
+        if(t>=0&&s.hand[opp][t]>0){ s.hand[opp][t]--; s.hand[p][t]++; ev.push({type:'steal-tile',window:w.slice(),from:opp,to:p,tile:t}); } } } }
+    for(let k=0;k<drawWindows.length;k++){ const got=[]; for(let n=0;n<3;n++){ const t=drawOneToHand(s,p,rng); if(t<0)break; got.push(t);} if(got.length)ev.push({type:'draw',player:p,tiles:got}); }
+    s.toMove=opp; return ev; }
+  function randomBotMove(s,rng){ const mv=legalPlacements(s); if(!mv.length)return null; return mv[Math.floor(rng()*mv.length)]; }
+  function makeRng(seed){ let a=seed>>>0; return function(){ a|=0; a=(a+0x6D2B79F5)|0; let t=Math.imul(a^(a>>>15),1|a); t=(t+Math.imul(t^(t>>>7),61|t))^t; return ((t^(t>>>14))>>>0)/4294967296; }; }
+  global.Irotoiro={OHA,TILE,mixTile,initialState,legalPlacements,applyTurn,randomBotMove,makeRng,isTerminal,handCount,bagCount,stockCount};
+})(window);
+
+/* ---------- UI ---------- */
+(function(){
+  const I=window.Irotoiro;
+  const OHA_CLASS=['red','blue','yellow'], OHA_NAME=['赤','青','黄'];
+  const TILE_CLASS=['pur','grn','org'], TILE_NAME=['紫','緑','橙'];
+  const HUMAN=0, BOT=1;
+
+  let state, rng, selected=null, busy=false, captured=[[],[]];
+  const boardEl=document.getElementById('board');
+  const cellEls=[];
+  const statusEl=document.getElementById('status');
+
+  // build board once
+  for(let i=0;i<25;i++){ const d=document.createElement('div'); d.className='cell'; d.dataset.cell=i;
+    d.addEventListener('click',()=>onCell(i)); boardEl.appendChild(d); cellEls.push(d); }
+
+  const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+  const reduced=window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const wait=ms=>reduced?sleep(Math.min(ms,120)):sleep(ms);
+
+  function ohaHTML(color){ return `<div class="ohajiki ${OHA_CLASS[color]}"></div>`; }
+  function tileHTML(color){ return `<div class="tile ${TILE_CLASS[color]}"></div>`; }
+  function pieceHTML(pc){ return pc.kind==='oha'?ohaHTML(pc.color):tileHTML(pc.color); }
+
+  function renderCell(i){ const pc=state.board[i]; cellEls[i].innerHTML=pc?pieceHTML(pc):''; }
+  function showPiece(i,pc,animClass){ cellEls[i].innerHTML=pieceHTML(pc); if(animClass){ const el=cellEls[i].firstChild; if(el) el.classList.add(animClass); } }
+
+  function newGame(){
+    rng=I.makeRng((Math.random()*2**31)>>>0);
+    state=I.initialState(rng); selected=null; busy=false; captured=[[],[]];
+    for(let i=0;i<25;i++) renderCell(i);
+    renderPanels(); renderChips();
+    setStatus('おはじきの色を選んで、空いているマスに置きましょう。');
+    document.getElementById('overlay').classList.remove('show');
+    updateActivePanel();
+  }
+
+  function renderChips(){
+    document.getElementById('bagCount').textContent=I.bagCount(state);
+    document.getElementById('turnText').textContent = I.isTerminal(state)?'対局終了':(state.toMove===HUMAN?'あなたの番':'Bot の番');
+  }
+  function updateActivePanel(){
+    document.getElementById('panel0').classList.toggle('active', !I.isTerminal(state)&&state.toMove===HUMAN);
+    document.getElementById('panel1').classList.toggle('active', !I.isTerminal(state)&&state.toMove===BOT);
+  }
+
+  function renderPanels(){ renderPanel(HUMAN); renderPanel(BOT); }
+  function renderPanel(p){
+    const panel=document.getElementById('panel'+p);
+    const isHuman=p===HUMAN;
+    const capGems=captured[p].map(c=>`<div class="gem ${OHA_CLASS[c]}"></div>`).join('');
+    const handTiles=[];
+    for(let t=0;t<3;t++) for(let n=0;n<state.hand[p][t];n++) handTiles.push(tileHTML(t));
+    const stockCols=[0,1,2].map(c=>{
+      const cnt=state.stock[p][c];
+      const dis=(isHuman?(cnt<=0||busy||state.toMove!==HUMAN):true)?'disabled':'';
+      const sel=(isHuman&&selected===c)?'sel':'';
+      return `<div class="stockcol">
+        <button class="stockbtn ${sel}" data-color="${c}" ${dis} aria-label="${OHA_NAME[c]} を選ぶ（残り${cnt}）">${ohaHTML(c)}</button>
+        <span class="cnt">${cnt}</span></div>`;
+    }).join('');
+    panel.innerHTML=`
+      <div class="player-head">
+        <span class="who">${isHuman?'あなた':'Bot'}<small>${isHuman?'YOU':'RANDOM'}</small></span>
+        <span class="score-total" id="score${p}"><span class="lbl">得点</span>${state.score[p]}</span>
+      </div>
+      <div class="trays">
+        <div class="tray"><div class="tray-label">得点</div><div class="captured">${capGems}</div></div>
+        <div class="tray"><div class="tray-label">手札 タイル</div><div class="hand">${handTiles.join('')}</div></div>
+        <div class="tray"><div class="tray-label">手持ち おはじき</div><div class="stock ${isHuman?'':'readonly'}">${stockCols}</div></div>
+      </div>`;
+    if(isHuman){ panel.querySelectorAll('.stockbtn').forEach(b=>{ if(!b.disabled) b.addEventListener('click',()=>selectColor(+b.dataset.color)); }); }
+  }
+
+  function setStatus(html){ statusEl.innerHTML=html; }
+
+  function selectColor(c){ if(busy||state.toMove!==HUMAN)return; selected=c; renderPanel(HUMAN); highlightCells();
+    setStatus(`<b>${OHA_NAME[c]}</b> を選択中 — 置くマスをタップ。`); }
+  function highlightCells(){ for(let i=0;i<25;i++) cellEls[i].classList.toggle('placeable', selected!==null&&state.board[i]===null&&state.toMove===HUMAN&&!busy); }
+  function clearHighlight(){ for(let i=0;i<25;i++) cellEls[i].classList.remove('placeable'); }
+
+  async function onCell(i){
+    if(busy||state.toMove!==HUMAN||I.isTerminal(state))return;
+    if(state.board[i]!==null)return;
+    if(selected===null){ setStatus('まず、置くおはじきの色を選んでください。'); return; }
+    const move={color:selected,cell:i}; selected=null; clearHighlight();
+    await doTurn(move);
+    if(I.isTerminal(state)){ endGame(); return; }
+    await wait(340);
+    await botTurn();
+  }
+
+  async function botTurn(){
+    if(I.isTerminal(state))return;
+    busy=true; renderPanels(); renderChips(); updateActivePanel();
+    setStatus('Bot が考えています…');
+    await wait(480);
+    const move=I.randomBotMove(state,rng);
+    await doTurn(move);
+    if(I.isTerminal(state)) endGame();
+    else setStatus('あなたの番です。おはじきの色を選んでください。');
+  }
+
+  async function doTurn(move){
+    busy=true; clearHighlight(); updateActivePanel();
+    const mover=state.toMove;
+    const ev=I.applyTurn(state,move,rng);   // mutates to final state
+    for(const e of ev){
+      if(e.type==='place'){ showPiece(e.cell,e.piece,'drop'); cellEls[e.cell].classList.add('land');
+        setStatus(`${mover===HUMAN?'あなた':'Bot'}が <b>${OHA_NAME[e.piece.color]}</b> を置きました。`);
+        await wait(200); cellEls[e.cell].classList.remove('land'); }
+      else if(e.type==='line-oha'){ e.window.forEach((c,k)=>setTimeout(()=>cellEls[c].classList.add('pulse'),k*55));
+        await wait(360); e.window.forEach(c=>cellEls[c].classList.remove('pulse')); }
+      else if(e.type==='exchange'){ showPiece(e.cell,{kind:'tile',color:e.tile},'flip'); captured[e.player].push(e.scoredColor);
+        renderPanel(e.player); popScore(e.player);
+        setStatus(`3つ並び！ <b>${OHA_NAME[e.scoredColor]}</b> を <b>${TILE_NAME[e.tile]}</b> タイルと交換 → ${e.player===HUMAN?'あなた':'Bot'} +1点`);
+        await wait(300); }
+      else if(e.type==='steal-point'){ moveCaptured(e.from,e.to); renderPanels(); popScore(e.to); flashPanel(e.to);
+        setStatus(`タイル3つ並び！ ${e.to===HUMAN?'あなた':'Bot'} が相手から <b>1点</b> を奪いました。`); await wait(320); }
+      else if(e.type==='steal-tile'){ renderPanels(); flashPanel(e.to);
+        setStatus(`タイル3つ並び！ 相手は0点 → <b>${TILE_NAME[e.tile]}</b> タイルを奪いました。`); await wait(320); }
+      else if(e.type==='draw'){ renderPanel(e.player);
+        const names=e.tiles.map(t=>TILE_NAME[t]).join('・');
+        setStatus(`3つ並び！ 袋からタイルを獲得：<b>${names}</b>`); await wait(240); }
+    }
+    busy=false; renderPanels(); renderChips(); updateActivePanel();
+  }
+
+  function popScore(p){ const el=document.getElementById('score'+p); if(el){ el.classList.remove('pop'); void el.offsetWidth; el.classList.add('pop'); } }
+  function flashPanel(p){ const el=document.getElementById('panel'+p); el.classList.remove('flash'); void el.offsetWidth; el.classList.add('flash'); }
+  function moveCaptured(from,to){ const g=captured[from].pop(); captured[to].push(g!==undefined?g:0); }
+
+  function endGame(){
+    clearHighlight(); renderChips(); updateActivePanel();
+    const s0=state.score[HUMAN], s1=state.score[BOT];
+    const t=document.getElementById('ovTitle'), b=document.getElementById('ovBody');
+    if(s0>s1) t.textContent='あなたの勝ち！';
+    else if(s1>s0) t.textContent='Bot の勝ち';
+    else t.textContent='引き分け';
+    b.innerHTML=`あなた <b>${s0}</b> — <b>${s1}</b> Bot`;
+    setStatus('対局終了。');
+    document.getElementById('overlay').classList.add('show');
+  }
+
+  // controls
+  document.getElementById('newBtn').addEventListener('click',newGame);
+  document.getElementById('ovAgain').addEventListener('click',newGame);
+  document.getElementById('themeBtn').addEventListener('click',()=>{
+    const root=document.documentElement;
+    const cur=root.dataset.theme||(window.matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');
+    root.dataset.theme=cur==='dark'?'light':'dark';
+  });
+  const dlg=document.getElementById('rulesDlg');
+  document.getElementById('rulesBtn').addEventListener('click',()=>dlg.showModal());
+  document.getElementById('rulesClose').addEventListener('click',()=>dlg.close());
+
+  newGame();
+})();
+</script>
