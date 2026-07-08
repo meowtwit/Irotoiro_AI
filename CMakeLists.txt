@@ -38,5 +38,14 @@ target_compile_options(irotoiro_bench
     -Wall -Wextra -Wpedantic
 )
 
+add_executable(irotoiro_cli
+  core/cli/cli.cpp
+)
+target_link_libraries(irotoiro_cli PRIVATE irotoiro_core)
+target_compile_options(irotoiro_cli
+  PRIVATE
+    -Wall -Wextra -Wpedantic
+)
+
 enable_testing()
 add_test(NAME irotoiro_core_tests COMMAND irotoiro_core_tests)
