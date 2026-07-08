@@ -14,6 +14,15 @@ struct SearchStats {
   bool timedOut = false;
 };
 
+struct ExpectimaxResult {
+  Move move;
+  double value = 0.0;
+  SearchStats stats;
+  bool completed = false;
+};
+
+ExpectimaxResult expectimaxMoveExact(const GameState& state, int maxDepth);
+ExpectimaxResult expectimaxMovePruned(const GameState& state, int maxDepth);
 Move expectimaxMove(const GameState& state, int maxDepth);
 Move expectimaxMoveTimed(const GameState& state, int timeBudgetMs);
 SearchStats lastExpectimaxStats();

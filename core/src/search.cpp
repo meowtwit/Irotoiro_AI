@@ -19,6 +19,12 @@ using Clock = std::chrono::steady_clock;
 SearchStats g_lastStats;
 constexpr std::size_t kMaxMoves = 75;
 constexpr std::size_t kMaxChanceOutcomes = 64;
+// Search values are always root-perspective and finite. The evaluator is
+// intentionally small (score, hand, and pattern terms), while terminal wins use
+// +/-1,024,000 at the extreme score diff, so this interval safely covers every
+// leaf and terminal value used by expectimax.
+constexpr double kValueMin = -2000000.0;
+constexpr double kValueMax = 2000000.0;
 
 bool comesBefore(Move a, Move b) {
   if (a.cell != b.cell) {
@@ -264,7 +270,20 @@ struct SearchContext {
   Clock::time_point deadline{};
   bool aborted = false;
   SearchStats stats;
-  std::unordered_map<uint64_t, double> tt;
+
+  enum class BoundFlag : uint8_t { Exact, Lower, Upper };
+
+  struct TTEntry {
+    double value = 0.0;
+    BoundFlag flag = BoundFlag::Exact;
+  };
+
+  struct BoundResult {
+    double value = 0.0;
+    BoundFlag flag = BoundFlag::Exact;
+  };
+
+  std::unordered_map<uint64_t, TTEntry> tt;
 
   bool expired() {
     if (!useDeadline || (stats.nodes & 1023ull) != 0ull) {
@@ -279,9 +298,14 @@ struct SearchContext {
   }
 };
 
-double expectiminimax(const GameState& state, int depth, SearchContext& ctx);
+using BoundFlag = SearchContext::BoundFlag;
+using BoundResult = SearchContext::BoundResult;
 
-double chanceValue(const DeterministicTurn& resolved, int depth, SearchContext& ctx) {
+double expectiminimaxExactValue(const GameState& state, int depth, SearchContext& ctx);
+BoundResult expectiminimaxPrunedValue(const GameState& state, int depth, double alpha, double beta,
+                                      SearchContext& ctx);
+
+double chanceValueExact(const DeterministicTurn& resolved, int depth, SearchContext& ctx) {
   const ChanceOutcomeBuffer outcomes =
       enumerateDrawOutcomesFast(resolved.state, resolved.drawBatches);
   ctx.stats.chanceOutcomes += outcomes.count;
@@ -292,12 +316,12 @@ double chanceValue(const DeterministicTurn& resolved, int depth, SearchContext& 
       return 0.0;
     }
     const ChanceOutcome& outcome = outcomes.outcomes[i];
-    value += outcome.probability * expectiminimax(outcome.state, depth - 1, ctx);
+    value += outcome.probability * expectiminimaxExactValue(outcome.state, depth - 1, ctx);
   }
   return value;
 }
 
-double expectiminimax(const GameState& state, int depth, SearchContext& ctx) {
+double expectiminimaxExactValue(const GameState& state, int depth, SearchContext& ctx) {
   ++ctx.stats.nodes;
   if (ctx.expired()) {
     return 0.0;
@@ -309,19 +333,13 @@ double expectiminimax(const GameState& state, int depth, SearchContext& ctx) {
     return static_cast<double>(evaluate(state, ctx.maximizingPlayer));
   }
 
-  const uint64_t key = stateHash(state, depth, ctx.maximizingPlayer);
-  const auto hit = ctx.tt.find(key);
-  if (hit != ctx.tt.end()) {
-    return hit->second;
-  }
-
   const bool maximizingNode = state.toMove == ctx.maximizingPlayer;
   double best = maximizingNode ? -std::numeric_limits<double>::infinity()
                                : std::numeric_limits<double>::infinity();
   const OrderedMoveList moves = orderedMoves(state, maximizingNode);
   for (std::size_t i = 0; i < moves.count; ++i) {
     const OrderedMove& ordered = moves.moves[i];
-    const double value = chanceValue(ordered.resolved, depth, ctx);
+    const double value = chanceValueExact(ordered.resolved, depth, ctx);
     if (ctx.aborted) {
       return 0.0;
     }
@@ -332,16 +350,142 @@ double expectiminimax(const GameState& state, int depth, SearchContext& ctx) {
     }
   }
 
-  ctx.tt.emplace(key, best);
   return best;
+}
+
+BoundResult chanceValuePruned(const DeterministicTurn& resolved, int depth, double alpha,
+                              double beta, SearchContext& ctx) {
+  const ChanceOutcomeBuffer outcomes =
+      enumerateDrawOutcomesFast(resolved.state, resolved.drawBatches);
+  ctx.stats.chanceOutcomes += outcomes.count;
+
+  double value = 0.0;
+  double remainingProbability = 0.0;
+  for (std::size_t i = 0; i < outcomes.count; ++i) {
+    remainingProbability += outcomes.outcomes[i].probability;
+  }
+
+  for (std::size_t i = 0; i < outcomes.count; ++i) {
+    if (ctx.aborted) {
+      return BoundResult{};
+    }
+
+    const ChanceOutcome& outcome = outcomes.outcomes[i];
+    remainingProbability -= outcome.probability;
+
+    const double p = outcome.probability;
+    const double childAlpha = (alpha - value - remainingProbability * kValueMax) / p;
+    const double childBeta = (beta - value - remainingProbability * kValueMin) / p;
+    const BoundResult child =
+        expectiminimaxPrunedValue(outcome.state, depth - 1, childAlpha, childBeta, ctx);
+    if (ctx.aborted) {
+      return BoundResult{};
+    }
+
+    if (child.flag == BoundFlag::Upper) {
+      const double upper = value + p * child.value + remainingProbability * kValueMax;
+      return BoundResult{upper, BoundFlag::Upper};
+    }
+    if (child.flag == BoundFlag::Lower) {
+      const double lower = value + p * child.value + remainingProbability * kValueMin;
+      return BoundResult{lower, BoundFlag::Lower};
+    }
+
+    value += p * child.value;
+
+    const double lower = value + remainingProbability * kValueMin;
+    const double upper = value + remainingProbability * kValueMax;
+    if (upper <= alpha) {
+      return BoundResult{upper, BoundFlag::Upper};
+    }
+    if (lower >= beta) {
+      return BoundResult{lower, BoundFlag::Lower};
+    }
+  }
+
+  return BoundResult{value, BoundFlag::Exact};
+}
+
+BoundResult expectiminimaxPrunedValue(const GameState& state, int depth, double alpha, double beta,
+                                      SearchContext& ctx) {
+  ++ctx.stats.nodes;
+  if (ctx.expired()) {
+    return BoundResult{};
+  }
+  if (isTerminal(state)) {
+    return BoundResult{terminalValue(state, ctx.maximizingPlayer), BoundFlag::Exact};
+  }
+  if (depth <= 0) {
+    return BoundResult{static_cast<double>(evaluate(state, ctx.maximizingPlayer)),
+                       BoundFlag::Exact};
+  }
+
+  const double originalAlpha = alpha;
+  const double originalBeta = beta;
+  const uint64_t key = stateHash(state, depth, ctx.maximizingPlayer);
+  const auto hit = ctx.tt.find(key);
+  if (hit != ctx.tt.end()) {
+    const SearchContext::TTEntry& entry = hit->second;
+    if (entry.flag == BoundFlag::Exact ||
+        (entry.flag == BoundFlag::Lower && entry.value >= beta) ||
+        (entry.flag == BoundFlag::Upper && entry.value <= alpha)) {
+      return BoundResult{entry.value, entry.flag};
+    }
+  }
+
+  const bool maximizingNode = state.toMove == ctx.maximizingPlayer;
+  double best = maximizingNode ? kValueMin : kValueMax;
+  const OrderedMoveList moves = orderedMoves(state, maximizingNode);
+  for (std::size_t i = 0; i < moves.count; ++i) {
+    const OrderedMove& ordered = moves.moves[i];
+    const BoundResult child = chanceValuePruned(ordered.resolved, depth, alpha, beta, ctx);
+    if (ctx.aborted) {
+      return BoundResult{};
+    }
+
+    if (maximizingNode) {
+      if (child.value > best) {
+        best = child.value;
+      }
+      if (best > alpha) {
+        alpha = best;
+      }
+      if (alpha >= beta) {
+        break;
+      }
+    } else {
+      if (child.value < best) {
+        best = child.value;
+      }
+      if (best < beta) {
+        beta = best;
+      }
+      if (alpha >= beta) {
+        break;
+      }
+    }
+  }
+
+  BoundFlag flag = BoundFlag::Exact;
+  if (best <= originalAlpha) {
+    flag = BoundFlag::Upper;
+  } else if (best >= originalBeta) {
+    flag = BoundFlag::Lower;
+  }
+
+  if (!ctx.aborted) {
+    ctx.tt[key] = SearchContext::TTEntry{best, flag};
+  }
+  return BoundResult{best, flag};
 }
 
 struct RootResult {
   Move move;
+  double value = 0.0;
   bool completed = false;
 };
 
-RootResult searchRoot(const GameState& state, int depth, SearchContext& ctx) {
+RootResult searchRootExact(const GameState& state, int depth, SearchContext& ctx) {
   const bool maximizingNode = state.toMove == ctx.maximizingPlayer;
   const OrderedMoveList moves = orderedMoves(state, maximizingNode);
   if (moves.count == 0) {
@@ -354,9 +498,9 @@ RootResult searchRoot(const GameState& state, int depth, SearchContext& ctx) {
 
   for (std::size_t i = 0; i < moves.count; ++i) {
     const OrderedMove& ordered = moves.moves[i];
-    const double value = chanceValue(ordered.resolved, depth, ctx);
+    const double value = chanceValueExact(ordered.resolved, depth, ctx);
     if (ctx.aborted) {
-      return RootResult{best, false};
+      return RootResult{best, bestValue, false};
     }
     if (!haveBest || value > bestValue ||
         (std::abs(value - bestValue) <= 1e-12 && comesBefore(ordered.move, best))) {
@@ -366,7 +510,50 @@ RootResult searchRoot(const GameState& state, int depth, SearchContext& ctx) {
     }
   }
 
-  return RootResult{best, true};
+  return RootResult{best, bestValue, true};
+}
+
+RootResult searchRootPruned(const GameState& state, int depth, SearchContext& ctx) {
+  OrderedMoveList moves = orderedMoves(state, true);
+  if (moves.count == 0) {
+    return RootResult{};
+  }
+  std::stable_sort(moves.moves.begin(), moves.moves.begin() + moves.count,
+                   [](const OrderedMove& a, const OrderedMove& b) {
+                     return comesBefore(a.move, b.move);
+                   });
+
+  Move best = moves.moves[0].move;
+  double bestValue = kValueMin;
+  double alpha = kValueMin;
+  constexpr double beta = kValueMax;
+  bool haveBest = false;
+
+  for (std::size_t i = 0; i < moves.count; ++i) {
+    const OrderedMove& ordered = moves.moves[i];
+    const BoundResult child = chanceValuePruned(ordered.resolved, depth, alpha, beta, ctx);
+    if (ctx.aborted) {
+      return RootResult{best, bestValue, false};
+    }
+
+    if (child.flag == BoundFlag::Exact &&
+        (!haveBest || child.value > bestValue ||
+         (std::abs(child.value - bestValue) <= 1e-12 && comesBefore(ordered.move, best)))) {
+      bestValue = child.value;
+      best = ordered.move;
+      haveBest = true;
+    } else if (!haveBest && child.flag != BoundFlag::Upper) {
+      bestValue = child.value;
+      best = ordered.move;
+      haveBest = true;
+    }
+
+    if (haveBest && bestValue > alpha) {
+      alpha = bestValue;
+    }
+  }
+
+  return RootResult{best, bestValue, haveBest};
 }
 
 int remainingPlies(const GameState& state) {
@@ -379,22 +566,44 @@ double elapsedMs(Clock::time_point start, Clock::time_point end) {
 
 }  // namespace
 
-Move expectimaxMove(const GameState& state, int maxDepth) {
+ExpectimaxResult expectimaxMoveExact(const GameState& state, int maxDepth) {
   const std::vector<Move> legal = legalPlacements(state);
   if (legal.empty()) {
-    g_lastStats = SearchStats{};
-    return Move{};
+    return ExpectimaxResult{};
   }
 
   const int depth = std::max(1, maxDepth);
   SearchContext ctx;
   ctx.maximizingPlayer = state.toMove;
   const auto start = Clock::now();
-  const RootResult result = searchRoot(state, depth, ctx);
+  const RootResult result = searchRootExact(state, depth, ctx);
   ctx.stats.completedDepth = result.completed ? depth : 0;
   ctx.stats.elapsedMs = elapsedMs(start, Clock::now());
-  g_lastStats = ctx.stats;
-  return result.completed ? result.move : legal.front();
+  return ExpectimaxResult{result.completed ? result.move : legal.front(), result.value, ctx.stats,
+                          result.completed};
+}
+
+ExpectimaxResult expectimaxMovePruned(const GameState& state, int maxDepth) {
+  const std::vector<Move> legal = legalPlacements(state);
+  if (legal.empty()) {
+    return ExpectimaxResult{};
+  }
+
+  const int depth = std::max(1, maxDepth);
+  SearchContext ctx;
+  ctx.maximizingPlayer = state.toMove;
+  const auto start = Clock::now();
+  const RootResult result = searchRootPruned(state, depth, ctx);
+  ctx.stats.completedDepth = result.completed ? depth : 0;
+  ctx.stats.elapsedMs = elapsedMs(start, Clock::now());
+  return ExpectimaxResult{result.completed ? result.move : legal.front(), result.value, ctx.stats,
+                          result.completed};
+}
+
+Move expectimaxMove(const GameState& state, int maxDepth) {
+  ExpectimaxResult result = expectimaxMovePruned(state, maxDepth);
+  g_lastStats = result.stats;
+  return result.move;
 }
 
 Move expectimaxMoveTimed(const GameState& state, int timeBudgetMs) {
@@ -413,7 +622,7 @@ Move expectimaxMoveTimed(const GameState& state, int timeBudgetMs) {
   Move best = legal.front();
   const int maxDepth = std::max(1, remainingPlies(state));
   for (int depth = 1; depth <= maxDepth; ++depth) {
-    RootResult result = searchRoot(state, depth, ctx);
+    RootResult result = searchRootPruned(state, depth, ctx);
     if (!result.completed || ctx.aborted) {
       break;
     }

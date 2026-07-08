@@ -387,6 +387,36 @@ void testExpectimaxTakesImmediateWinningExchange(TestContext& ctx) {
   CHECK(ctx, found);
 }
 
+GameState randomReachedState(uint32_t seed, int plies) {
+  Rng rng(seed);
+  GameState state = initialState(rng);
+  for (int ply = 0; ply < plies && !isTerminal(state); ++ply) {
+    Move move = randomMove(state, rng);
+    applyTurn(state, move, rng);
+  }
+  return state;
+}
+
+void testPrunedExpectimaxMatchesExactReference(TestContext& ctx) {
+  const std::vector<GameState> states = {
+      randomReachedState(0x51000000u, 0), randomReachedState(0x51000003u, 3),
+      randomReachedState(0x51000006u, 6), randomReachedState(0x51000009u, 9),
+      randomReachedState(0x51000012u, 12),
+  };
+
+  for (const GameState& state : states) {
+    for (int depth = 1; depth <= 3; ++depth) {
+      const ExpectimaxResult exact = expectimaxMoveExact(state, depth);
+      const ExpectimaxResult pruned = expectimaxMovePruned(state, depth);
+      CHECK(ctx, exact.completed);
+      CHECK(ctx, pruned.completed);
+      CHECK(ctx, std::abs(exact.value - pruned.value) <= 1e-9);
+      CHECK_EQ(ctx, static_cast<int>(pruned.move.cell), static_cast<int>(exact.move.cell));
+      CHECK_EQ(ctx, static_cast<int>(pruned.move.color), static_cast<int>(exact.move.color));
+    }
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -399,6 +429,7 @@ int main() {
   testGreedyReturnsLegalMoves(ctx);
   testChanceOutcomesSumAndConserveTiles(ctx);
   testExpectimaxTakesImmediateWinningExchange(ctx);
+  testPrunedExpectimaxMatchesExactReference(ctx);
 
   const int total = ctx.passed + ctx.failed;
   std::cout << "Irotoiro core tests\n";
