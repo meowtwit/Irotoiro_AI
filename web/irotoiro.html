@@ -86,8 +86,11 @@
   .gauge-track { position:relative; height:12px; border-radius:999px; background:var(--sunken); box-shadow:inset 1px 1px 3px var(--well-lo),inset -1px -1px 2px var(--well-hi); overflow:hidden; }
   .gauge-fill { position:absolute; top:0; bottom:0; left:50%; width:0; border-radius:999px; transition:width .5s cubic-bezier(.2,.85,.25,1),left .5s cubic-bezier(.2,.85,.25,1),background .3s; }
   .gauge-mid { position:absolute; left:50%; top:-1px; bottom:-1px; width:2px; background:var(--hairline); transform:translateX(-50%); z-index:1; }
-  .gauge-cap { font-size:11px; letter-spacing:.06em; color:var(--ink-soft); text-align:center; margin-top:5px; }
+  .gauge-cap { font-size:11px; letter-spacing:.06em; color:var(--ink-soft); text-align:center; margin-top:5px; transition:opacity .2s; }
   .gauge-cap b { color:var(--ink); }
+  .gauge-cap .gauge-d { color:var(--ink-soft); font-weight:400; margin-left:6px; }
+  .gauge-cap.evaluating { opacity:.5; }
+  .gauge-cap.evaluating::after { content:" · 評価中…"; color:var(--accent); }
 
   /* AI thinking feed */
   .feed-wrap { width:100%; max-width:520px; margin:0 auto; }
@@ -690,6 +693,54 @@
     return {move:best, value:bestValue, completed:haveBest, stats:ctx};
   }
 
+  // position value from a FIXED perspective (root is MAX if perspective to move, else MIN)
+  async function rootValueDepth(state, depth, deadline, perspective, shouldAbort) {
+    const ctx = makeContext(perspective, deadline);
+    const maximizingNode = state.toMove === perspective;
+    const moves = orderedMoves(state, maximizingNode);
+    if (!moves.length) return {value: terminalValue(state, perspective), completed:true, nodes:0};
+    let best = maximizingNode ? VALUE_MIN : VALUE_MAX;
+    let alpha = VALUE_MIN, beta = VALUE_MAX, have = false;
+    for (const ordered of moves) {
+      if ((deadline != null && now() >= deadline) || (shouldAbort && shouldAbort())) throw new AbortSearch();
+      const value = chanceValue(ordered.resolved, depth, ctx);
+      if (maximizingNode) { if (!have || value > best) best = value; if (best > alpha) alpha = best; }
+      else { if (!have || value < best) best = value; if (best < beta) beta = best; }
+      have = true;
+      if (alpha >= beta) break;
+      await yieldTurn();
+    }
+    return {value: best, completed: have, nodes: ctx.nodes};
+  }
+
+  // Evaluate the current position by iterative-deepening search (stable, deep) from `perspective`.
+  async function analyze(state, opts) {
+    opts = opts || {};
+    const s = I.cloneState(state);
+    const perspective = opts.perspective == null ? s.toMove : opts.perspective;
+    const timeMs = Math.max(1, opts.timeMs == null ? 1000 : opts.timeMs);
+    if (I.isTerminal(s)) return {value: terminalValue(s, perspective), depth:0, nodes:0, nps:0, ms:0, perspective};
+    const startedAt = now();
+    const deadline = startedAt + timeMs;
+    let value = evaluate(s, perspective), reached = 0, totalNodes = 0;
+    const shouldAbort = opts.shouldAbort || null;
+    const maxDepth = Math.max(1, I.stockCount(s,0) + I.stockCount(s,1));
+    for (let depth=1; depth<=maxDepth; depth++) {
+      if (now() >= deadline || (shouldAbort && shouldAbort())) break;
+      try {
+        const r = await rootValueDepth(s, depth, deadline, perspective, shouldAbort);
+        totalNodes += r.nodes;
+        if (r.completed) { value = r.value; reached = depth; }
+      } catch (err) {
+        if (err instanceof AbortSearch) break;
+        throw err;
+      }
+      await yieldTurn();
+    }
+    const ms = now() - startedAt;
+    return {value, depth:reached, nodes:totalNodes, nps: totalNodes/Math.max(0.001, ms/1000), ms, perspective};
+  }
+
   function randomMove(state, rngOrMathRandom) {
     const rng = rngOrMathRandom || Math.random;
     const moves = I.legalPlacements(state);
@@ -796,7 +847,7 @@
 
   function lastSearchStats(){ return lastStats; }
 
-  return {evaluate, resolveTurnDeterministic, enumerateDrawOutcomes, bestMove, randomMove, greedyMove, lastSearchStats};
+  return {evaluate, resolveTurnDeterministic, enumerateDrawOutcomes, bestMove, randomMove, greedyMove, lastSearchStats, analyze};
 });
 
 /* ---------- UI ---------- */
@@ -842,12 +893,12 @@
     setStatus('おはじきの色を選んで、空いているマスに置きましょう。');
     document.getElementById('overlay').classList.remove('show');
     updateActivePanel();
+    setGaugeValue(0); refreshGauge();
   }
 
   function renderChips(){
     document.getElementById('bagCount').textContent=I.bagCount(state);
     document.getElementById('turnText').textContent = I.isTerminal(state)?'対局終了':(state.toMove===HUMAN?'あなたの番':'AI の番');
-    updateGauge();
   }
   function updateActivePanel(){
     document.getElementById('panel0').classList.toggle('active', !I.isTerminal(state)&&state.toMove===HUMAN);
@@ -884,15 +935,30 @@
 
   function setStatus(html){ statusEl.innerHTML=html; }
 
-  // advantage gauge (from your perspective: >0 = you ahead)
-  function updateGauge(){
+  // advantage gauge — driven by a ~1s deep search of BOTH sides (stable), not the jittery 1-ply eval
+  let gaugeGen=0;
+  function setGaugeValue(v, depth){
     const fill=document.getElementById('gaugeFill'), cap=document.getElementById('gaugeCap');
-    if(!fill||!AI||!AI.evaluate) return;
-    const v=AI.evaluate(state, HUMAN);
+    if(!fill) return;
     const pct=Math.tanh(v/400), half=Math.abs(pct)*50;
     if(pct>=0){ fill.style.left='50%'; fill.style.width=half+'%'; fill.style.background='var(--grn)'; }
     else { fill.style.left=(50-half)+'%'; fill.style.width=half+'%'; fill.style.background='var(--red)'; }
-    cap.innerHTML='<b>'+(Math.abs(pct)<0.06?'互角':(pct>0?'あなた優勢':'AI優勢'))+'</b>';
+    const word=Math.abs(pct)<0.06?'互角':(pct>0?'あなた優勢':'AI優勢');
+    cap.innerHTML='<b>'+word+'</b>'+(depth!=null?` <span class="gauge-d">深さ${depth}で判定</span>`:'');
+  }
+  async function refreshGauge(){
+    if(!AI||!AI.analyze){ return; }
+    const gen=++gaugeGen;
+    const cap=document.getElementById('gaugeCap'); if(cap) cap.classList.add('evaluating');
+    const abort=()=>gen!==gaugeGen;
+    try{
+      const rh=await AI.analyze(state,{timeMs:1000,perspective:HUMAN,shouldAbort:abort});
+      if(gen!==gaugeGen) return;
+      const ra=await AI.analyze(state,{timeMs:1000,perspective:BOT,shouldAbort:abort});
+      if(gen!==gaugeGen) return;
+      setGaugeValue((rh.value-ra.value)/2, Math.min(rh.depth,ra.depth));
+    }catch(e){ if(gen===gaugeGen && AI.evaluate) setGaugeValue(AI.evaluate(state,HUMAN)); }
+    finally{ if(gen===gaugeGen && cap) cap.classList.remove('evaluating'); }
   }
 
   // AI thinking feed
@@ -940,7 +1006,7 @@
     const dt=clock()-t0; if(dt<300) await wait(300-dt);   // 速いレベルでも一拍おく
     await doTurn(move);
     if(I.isTerminal(state)) endGame();
-    else setStatus('あなたの番です。おはじきの色を選んでください。');
+    else { setStatus('あなたの番です。おはじきの色を選んでください。'); refreshGauge(); }
   }
 
   async function doTurn(move){

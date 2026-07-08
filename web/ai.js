@@ -314,6 +314,54 @@
     return {move:best, value:bestValue, completed:haveBest, stats:ctx};
   }
 
+  // position value from a FIXED perspective (root is MAX if perspective to move, else MIN)
+  async function rootValueDepth(state, depth, deadline, perspective, shouldAbort) {
+    const ctx = makeContext(perspective, deadline);
+    const maximizingNode = state.toMove === perspective;
+    const moves = orderedMoves(state, maximizingNode);
+    if (!moves.length) return {value: terminalValue(state, perspective), completed:true, nodes:0};
+    let best = maximizingNode ? VALUE_MIN : VALUE_MAX;
+    let alpha = VALUE_MIN, beta = VALUE_MAX, have = false;
+    for (const ordered of moves) {
+      if ((deadline != null && now() >= deadline) || (shouldAbort && shouldAbort())) throw new AbortSearch();
+      const value = chanceValue(ordered.resolved, depth, ctx);
+      if (maximizingNode) { if (!have || value > best) best = value; if (best > alpha) alpha = best; }
+      else { if (!have || value < best) best = value; if (best < beta) beta = best; }
+      have = true;
+      if (alpha >= beta) break;
+      await yieldTurn();
+    }
+    return {value: best, completed: have, nodes: ctx.nodes};
+  }
+
+  // Evaluate the current position by iterative-deepening search (stable, deep) from `perspective`.
+  async function analyze(state, opts) {
+    opts = opts || {};
+    const s = I.cloneState(state);
+    const perspective = opts.perspective == null ? s.toMove : opts.perspective;
+    const timeMs = Math.max(1, opts.timeMs == null ? 1000 : opts.timeMs);
+    if (I.isTerminal(s)) return {value: terminalValue(s, perspective), depth:0, nodes:0, nps:0, ms:0, perspective};
+    const startedAt = now();
+    const deadline = startedAt + timeMs;
+    let value = evaluate(s, perspective), reached = 0, totalNodes = 0;
+    const shouldAbort = opts.shouldAbort || null;
+    const maxDepth = Math.max(1, I.stockCount(s,0) + I.stockCount(s,1));
+    for (let depth=1; depth<=maxDepth; depth++) {
+      if (now() >= deadline || (shouldAbort && shouldAbort())) break;
+      try {
+        const r = await rootValueDepth(s, depth, deadline, perspective, shouldAbort);
+        totalNodes += r.nodes;
+        if (r.completed) { value = r.value; reached = depth; }
+      } catch (err) {
+        if (err instanceof AbortSearch) break;
+        throw err;
+      }
+      await yieldTurn();
+    }
+    const ms = now() - startedAt;
+    return {value, depth:reached, nodes:totalNodes, nps: totalNodes/Math.max(0.001, ms/1000), ms, perspective};
+  }
+
   function randomMove(state, rngOrMathRandom) {
     const rng = rngOrMathRandom || Math.random;
     const moves = I.legalPlacements(state);
@@ -420,5 +468,5 @@
 
   function lastSearchStats(){ return lastStats; }
 
-  return {evaluate, resolveTurnDeterministic, enumerateDrawOutcomes, bestMove, randomMove, greedyMove, lastSearchStats};
+  return {evaluate, resolveTurnDeterministic, enumerateDrawOutcomes, bestMove, randomMove, greedyMove, lastSearchStats, analyze};
 });
