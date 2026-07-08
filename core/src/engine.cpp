@@ -2,6 +2,7 @@
 
 #include <cassert>
 #include <cmath>
+#include <map>
 
 namespace irotoiro {
 namespace {
@@ -54,6 +55,95 @@ bool isAllKind(const GameState& state, const Window& window, CellKind kind) {
     }
   }
   return true;
+}
+
+std::string stateKey(const GameState& state) {
+  std::string key;
+  key.reserve(25 * 2 + 2 * 3 + 2 * 3 + 3 + 2 + 1);
+  for (const Cell& cell : state.board) {
+    key.push_back(static_cast<char>(cell.kind));
+    key.push_back(static_cast<char>(cell.color));
+  }
+  for (const auto& stock : state.stock) {
+    for (uint8_t n : stock) {
+      key.push_back(static_cast<char>(n));
+    }
+  }
+  for (const auto& hand : state.hand) {
+    for (uint8_t n : hand) {
+      key.push_back(static_cast<char>(n));
+    }
+  }
+  for (uint8_t n : state.bag) {
+    key.push_back(static_cast<char>(n));
+  }
+  for (uint8_t n : state.score) {
+    key.push_back(static_cast<char>(n));
+  }
+  key.push_back(static_cast<char>(state.toMove));
+  return key;
+}
+
+void addChanceOutcome(std::map<std::string, ChanceOutcome>& merged, GameState state,
+                      double probability) {
+  state.toMove = static_cast<uint8_t>(1 - state.toMove);
+  const std::string key = stateKey(state);
+  auto it = merged.find(key);
+  if (it == merged.end()) {
+    merged.emplace(key, ChanceOutcome{probability, state});
+  } else {
+    it->second.probability += probability;
+  }
+}
+
+void enumerateDrawsInBatch(const GameState& state, int batch, int drawInBatch, int drawBatches,
+                           double probability, std::map<std::string, ChanceOutcome>& merged);
+
+void enumerateDrawBatch(const GameState& state, int batch, int drawBatches, double probability,
+                        std::map<std::string, ChanceOutcome>& merged) {
+  if (batch >= drawBatches) {
+    addChanceOutcome(merged, state, probability);
+    return;
+  }
+  enumerateDrawsInBatch(state, batch, 0, drawBatches, probability, merged);
+}
+
+void enumerateDrawsInBatch(const GameState& state, int batch, int drawInBatch, int drawBatches,
+                           double probability, std::map<std::string, ChanceOutcome>& merged) {
+  if (drawInBatch >= 3 || handCount(state, state.toMove) >= 6 || bagCount(state) == 0) {
+    enumerateDrawBatch(state, batch + 1, drawBatches, probability, merged);
+    return;
+  }
+
+  const int player = state.toMove;
+  const int total = bagCount(state);
+  for (int tile = 0; tile < 3; ++tile) {
+    if (state.bag[tile] == 0) {
+      continue;
+    }
+    GameState next = state;
+    const double p = static_cast<double>(next.bag[tile]) / static_cast<double>(total);
+    --next.bag[tile];
+    ++next.hand[player][tile];
+    enumerateDrawsInBatch(next, batch, drawInBatch + 1, drawBatches, probability * p, merged);
+  }
+}
+
+void drawBatchesToHand(GameState& state, int player, int drawBatches, Rng& rng,
+                       TurnStats& stats) {
+  for (int batch = 0; batch < drawBatches; ++batch) {
+    bool gotAny = false;
+    for (int n = 0; n < 3; ++n) {
+      const int tile = drawOneToHand(state, player, rng);
+      if (tile < 0) {
+        break;
+      }
+      gotAny = true;
+    }
+    if (gotAny) {
+      ++stats.drawEvents;
+    }
+  }
 }
 
 }  // namespace
@@ -173,13 +263,15 @@ Move randomMove(const GameState& state, Rng& rng) {
   return moves[idx];
 }
 
-TurnStats applyTurn(GameState& state, Move move, Rng& rng) {
+DeterministicTurn resolveTurnDeterministic(const GameState& state, Move move) {
+  DeterministicTurn result;
+  result.state = state;
+  GameState& next = result.state;
   const int player = state.toMove;
   const int opponent = 1 - player;
-  TurnStats stats;
 
-  state.board[move.cell] = Cell{Ohajiki, move.color};
-  --state.stock[player][move.color];
+  next.board[move.cell] = Cell{Ohajiki, move.color};
+  --next.stock[player][move.color];
 
   struct AabWindow {
     uint8_t minorityCell = 0;
@@ -191,13 +283,13 @@ TurnStats applyTurn(GameState& state, Move move, Rng& rng) {
 
   for (uint8_t wi : windowsThroughCell()[move.cell]) {
     const Window& window = windows()[wi];
-    if (!isAllKind(state, window, Ohajiki)) {
+    if (!isAllKind(next, window, Ohajiki)) {
       continue;
     }
 
     std::array<int, 3> count = {0, 0, 0};
     for (uint8_t cell : window.cells) {
-      ++count[state.board[cell].color];
+      ++count[next.board[cell].color];
     }
 
     int distinct = 0;
@@ -224,7 +316,7 @@ TurnStats applyTurn(GameState& state, Move move, Rng& rng) {
 
     uint8_t minorityCell = 0;
     for (uint8_t cell : window.cells) {
-      if (state.board[cell].color == minority) {
+      if (next.board[cell].color == minority) {
         minorityCell = cell;
         break;
       }
@@ -240,16 +332,16 @@ TurnStats applyTurn(GameState& state, Move move, Rng& rng) {
     if (consumed[window.minorityCell]) {
       continue;
     }
-    if (state.hand[player][window.mix] == 0) {
+    if (next.hand[player][window.mix] == 0) {
       continue;
     }
 
-    --state.hand[player][window.mix];
-    ++state.score[player];
-    state.board[window.minorityCell] = Cell{Tile, window.mix};
+    --next.hand[player][window.mix];
+    ++next.score[player];
+    next.board[window.minorityCell] = Cell{Tile, window.mix};
     consumed[window.minorityCell] = true;
     placedTileCells.push_back(window.minorityCell);
-    ++stats.exchanges;
+    ++result.stats.exchanges;
   }
 
   std::array<bool, 48> seenTileWindows{};
@@ -260,47 +352,58 @@ TurnStats applyTurn(GameState& state, Move move, Rng& rng) {
         continue;
       }
       const Window& window = windows()[wi];
-      if (!isAllKind(state, window, Tile)) {
+      if (!isAllKind(next, window, Tile)) {
         continue;
       }
 
       seenTileWindows[wi] = true;
-      if (state.score[opponent] > 0) {
-        --state.score[opponent];
-        ++state.score[player];
-        ++stats.steals;
-      } else if (handCount(state, player) < 6 && handCount(state, opponent) > 0) {
+      if (next.score[opponent] > 0) {
+        --next.score[opponent];
+        ++next.score[player];
+        ++result.stats.steals;
+      } else if (handCount(next, player) < 6 && handCount(next, opponent) > 0) {
         int tile = -1;
         int best = -1;
         for (int k = 0; k < 3; ++k) {
-          if (state.hand[opponent][k] > best) {
-            best = state.hand[opponent][k];
+          if (next.hand[opponent][k] > best) {
+            best = next.hand[opponent][k];
             tile = k;
           }
         }
-        if (tile >= 0 && state.hand[opponent][tile] > 0) {
-          --state.hand[opponent][tile];
-          ++state.hand[player][tile];
-          ++stats.steals;
+        if (tile >= 0 && next.hand[opponent][tile] > 0) {
+          --next.hand[opponent][tile];
+          ++next.hand[player][tile];
+          ++result.stats.steals;
         }
       }
     }
   }
 
-  for (size_t k = 0; k < drawWindowIndices.size(); ++k) {
-    bool gotAny = false;
-    for (int n = 0; n < 3; ++n) {
-      const int tile = drawOneToHand(state, player, rng);
-      if (tile < 0) {
-        break;
-      }
-      gotAny = true;
-    }
-    if (gotAny) {
-      ++stats.drawEvents;
-    }
-  }
+  result.drawBatches = static_cast<int>(drawWindowIndices.size());
+  return result;
+}
 
+std::vector<ChanceOutcome> enumerateDrawOutcomes(const GameState& preDrawState,
+                                                 int drawBatches) {
+  std::map<std::string, ChanceOutcome> merged;
+  enumerateDrawBatch(preDrawState, 0, drawBatches, 1.0, merged);
+
+  std::vector<ChanceOutcome> outcomes;
+  outcomes.reserve(merged.size());
+  for (auto& entry : merged) {
+    outcomes.push_back(entry.second);
+  }
+  return outcomes;
+}
+
+TurnStats applyTurn(GameState& state, Move move, Rng& rng) {
+  DeterministicTurn resolved = resolveTurnDeterministic(state, move);
+  state = resolved.state;
+  TurnStats stats = resolved.stats;
+  const int player = state.toMove;
+  const int opponent = 1 - player;
+
+  drawBatchesToHand(state, player, resolved.drawBatches, rng, stats);
   state.toMove = static_cast<uint8_t>(opponent);
   return stats;
 }

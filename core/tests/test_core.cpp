@@ -1,7 +1,9 @@
 #include "irotoiro/engine.hpp"
 #include "irotoiro/bot.hpp"
+#include "irotoiro/search.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
@@ -330,6 +332,61 @@ void testGreedyReturnsLegalMoves(TestContext& ctx) {
   }
 }
 
+void testChanceOutcomesSumAndConserveTiles(TestContext& ctx) {
+  GameState s = edgeState();
+  putOha(s, 0, R);
+  putOha(s, 1, R);
+  s.bag = {2, 1, 0};
+  s.stock = {{{1, 0, 0}, {0, 0, 0}}};
+
+  const DeterministicTurn resolved = resolveTurnDeterministic(s, Move{R, 2});
+  CHECK_EQ(ctx, resolved.drawBatches, 1);
+
+  const int preHand = handCount(resolved.state, 0) + handCount(resolved.state, 1);
+  const int preBag = bagCount(resolved.state);
+  const std::vector<ChanceOutcome> outcomes =
+      enumerateDrawOutcomes(resolved.state, resolved.drawBatches);
+
+  double probabilitySum = 0.0;
+  double expectedHand = 0.0;
+  double expectedBag = 0.0;
+  for (const ChanceOutcome& outcome : outcomes) {
+    probabilitySum += outcome.probability;
+    const int hand = handCount(outcome.state, 0) + handCount(outcome.state, 1);
+    const int bag = bagCount(outcome.state);
+    expectedHand += outcome.probability * static_cast<double>(hand);
+    expectedBag += outcome.probability * static_cast<double>(bag);
+    CHECK_EQ(ctx, hand + bag, preHand + preBag);
+    CHECK_EQ(ctx, outcome.state.toMove, 1);
+  }
+
+  CHECK(ctx, std::abs(probabilitySum - 1.0) <= 1e-9);
+  CHECK(ctx, std::abs(expectedHand - static_cast<double>(preHand + 3)) <= 1e-9);
+  CHECK(ctx, std::abs(expectedBag - static_cast<double>(preBag - 3)) <= 1e-9);
+}
+
+void testExpectimaxTakesImmediateWinningExchange(TestContext& ctx) {
+  GameState s = edgeState();
+  putOha(s, 0, R);
+  putOha(s, 1, R);
+  s.stock = {{{0, 1, 0}, {0, 0, 0}}};
+  s.hand[0][P] = 1;
+
+  const Move first = expectimaxMove(s, 1);
+  const Move second = expectimaxMove(s, 2);
+
+  CHECK_EQ(ctx, static_cast<int>(first.cell), 2);
+  CHECK_EQ(ctx, static_cast<int>(first.color), B);
+  CHECK_EQ(ctx, static_cast<int>(second.cell), 2);
+  CHECK_EQ(ctx, static_cast<int>(second.color), B);
+
+  const std::vector<Move> legal = legalPlacements(s);
+  const bool found = std::any_of(legal.begin(), legal.end(), [&](Move legalMove) {
+    return legalMove.cell == second.cell && legalMove.color == second.color;
+  });
+  CHECK(ctx, found);
+}
+
 }  // namespace
 
 int main() {
@@ -340,6 +397,8 @@ int main() {
   testEdgeCases(ctx);
   testGreedyTakesImmediateExchange(ctx);
   testGreedyReturnsLegalMoves(ctx);
+  testChanceOutcomesSumAndConserveTiles(ctx);
+  testExpectimaxTakesImmediateWinningExchange(ctx);
 
   const int total = ctx.passed + ctx.failed;
   std::cout << "Irotoiro core tests\n";

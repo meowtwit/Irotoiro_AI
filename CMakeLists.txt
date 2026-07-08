@@ -8,6 +8,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 add_library(irotoiro_core
   core/src/engine.cpp
   core/src/bot.cpp
+  core/src/search.cpp
 )
 target_include_directories(irotoiro_core
   PUBLIC

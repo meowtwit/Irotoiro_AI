@@ -1,5 +1,6 @@
 #include "irotoiro/bot.hpp"
 #include "irotoiro/engine.hpp"
+#include "irotoiro/search.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -42,7 +43,29 @@ struct MatchResult {
   uint64_t checksum = 0;
 };
 
+struct ReachableDepthRow {
+  int randomPlies = 0;
+  int budgetMs = 0;
+  int completedDepth = 0;
+  uint64_t nodes = 0;
+  double ms = 0.0;
+};
+
+struct ExpectimaxMatchResult {
+  int games = 0;
+  int expectimaxWins = 0;
+  int greedyWins = 0;
+  int draws = 0;
+  int plies = 0;
+  int expectimaxMoves = 0;
+  double totalMs = 0.0;
+  double expectimaxMs = 0.0;
+  uint64_t expectimaxNodes = 0;
+  uint64_t checksum = 0;
+};
+
 enum class PlayerKind { Random, Greedy };
+enum class StrengthKind { Greedy, Expectimax };
 
 double elapsedMs(Clock::time_point start, Clock::time_point end) {
   return std::chrono::duration<double, std::milli>(end - start).count();
@@ -232,6 +255,82 @@ double mnodesPerSec(uint64_t applyCalls, double ms) {
   return static_cast<double>(applyCalls) / ms / 1000.0;
 }
 
+GameState randomMidgame(uint32_t seed, int plies) {
+  Rng rng(seed);
+  GameState state = initialState(rng);
+  for (int ply = 0; ply < plies && !isTerminal(state); ++ply) {
+    Move move = randomMove(state, rng);
+    applyTurn(state, move, rng);
+  }
+  return state;
+}
+
+std::vector<ReachableDepthRow> runReachableDepthBench() {
+  std::vector<ReachableDepthRow> rows;
+  const std::vector<int> ks = {6, 12, 18};
+  const std::vector<int> budgets = {100, 500, 1000};
+  for (int k : ks) {
+    const GameState state = randomMidgame(0xE1000000u + static_cast<uint32_t>(k), k);
+    for (int budget : budgets) {
+      expectimaxMoveTimed(state, budget);
+      const SearchStats stats = lastExpectimaxStats();
+      rows.push_back(ReachableDepthRow{k, budget, stats.completedDepth, stats.nodes,
+                                       stats.elapsedMs});
+    }
+  }
+  return rows;
+}
+
+void addExpectimaxWin(ExpectimaxMatchResult& result, const GameState& state, int expectimaxPlayer) {
+  const int greedyPlayer = 1 - expectimaxPlayer;
+  if (state.score[expectimaxPlayer] > state.score[greedyPlayer]) {
+    ++result.expectimaxWins;
+  } else if (state.score[expectimaxPlayer] < state.score[greedyPlayer]) {
+    ++result.greedyWins;
+  } else {
+    ++result.draws;
+  }
+}
+
+GameState playExpectimaxGreedyMatch(uint32_t seed, StrengthKind p0, StrengthKind p1, int depth,
+                                    ExpectimaxMatchResult& result, int expectimaxPlayer) {
+  Rng rng(seed);
+  GameState state = initialState(rng);
+  while (!isTerminal(state)) {
+    Move move;
+    const StrengthKind kind = state.toMove == 0 ? p0 : p1;
+    if (kind == StrengthKind::Expectimax) {
+      const auto searchStart = Clock::now();
+      move = expectimaxMove(state, depth);
+      result.expectimaxMs += elapsedMs(searchStart, Clock::now());
+      result.expectimaxNodes += lastExpectimaxStats().nodes;
+      ++result.expectimaxMoves;
+    } else {
+      move = greedyMove(state, rng);
+    }
+    applyTurn(state, move, rng);
+    ++result.plies;
+  }
+
+  addExpectimaxWin(result, state, expectimaxPlayer);
+  mixChecksum(result.checksum, state);
+  return state;
+}
+
+ExpectimaxMatchResult runExpectimaxVsGreedy(int pairedGames, int depth) {
+  ExpectimaxMatchResult result;
+  result.games = pairedGames * 2;
+  const auto start = Clock::now();
+  for (int game = 0; game < pairedGames; ++game) {
+    playExpectimaxGreedyMatch(0xE2000000u + static_cast<uint32_t>(game),
+                              StrengthKind::Expectimax, StrengthKind::Greedy, depth, result, 0);
+    playExpectimaxGreedyMatch(0xE3000000u + static_cast<uint32_t>(game), StrengthKind::Greedy,
+                              StrengthKind::Expectimax, depth, result, 1);
+  }
+  result.totalMs = elapsedMs(start, Clock::now());
+  return result;
+}
+
 double perSec(int count, double ms) {
   if (ms <= 0.0) {
     return 0.0;
@@ -278,6 +377,31 @@ void printMatch(const std::string& name, const MatchResult& r, const std::string
             << perSec(r.greedyMoves, r.greedyMs) << "\n";
 }
 
+void printReachableDepth(const std::vector<ReachableDepthRow>& rows) {
+  std::cout << "\nexpectimax reachable depth (iterative deepening, exact draw chance)\n";
+  std::cout << "random plies   budget ms   depth completed          nodes        ms    Mnodes/s\n";
+  for (const ReachableDepthRow& row : rows) {
+    std::cout << std::setw(12) << row.randomPlies << std::setw(12) << row.budgetMs
+              << std::setw(18) << row.completedDepth << std::setw(15) << row.nodes
+              << std::setw(10) << std::fixed << std::setprecision(2) << row.ms << std::setw(12)
+              << std::setprecision(3) << mnodesPerSec(row.nodes, row.ms) << "\n";
+  }
+}
+
+void printExpectimaxMatch(const ExpectimaxMatchResult& r, int depth) {
+  const double winRate = r.games == 0 ? 0.0 : 100.0 * r.expectimaxWins / r.games;
+  std::cout << "\nexpectimax(depth=" << depth << ") vs greedy (paired seats)\n";
+  std::cout << "games=" << r.games << "  expectimax wins=" << r.expectimaxWins
+            << "  greedy wins=" << r.greedyWins << "  draws=" << r.draws << "  win%="
+            << std::fixed << std::setprecision(1) << winRate << "  total ms="
+            << std::setprecision(2) << r.totalMs << "\n";
+  std::cout << "expectimax moves=" << r.expectimaxMoves << "  search ms=" << std::setprecision(2)
+            << r.expectimaxMs << "  moves/s=" << std::setprecision(1)
+            << perSec(r.expectimaxMoves, r.expectimaxMs) << "  nodes=" << r.expectimaxNodes
+            << "  Mnodes/s=" << std::setprecision(3)
+            << mnodesPerSec(r.expectimaxNodes, r.expectimaxMs) << "\n";
+}
+
 }  // namespace
 
 int main() {
@@ -304,7 +428,12 @@ int main() {
   const MatchResult greedyGreedy = runGreedyVsGreedy(1000);
   printMatch("greedy vs greedy", greedyGreedy, "player0 wins", "player1 wins");
 
-  std::cout << "\nexpectimax: not implemented in this Stage 2 build (TODO)\n";
+  const std::vector<ReachableDepthRow> reachableRows = runReachableDepthBench();
+  printReachableDepth(reachableRows);
+
+  constexpr int kStrengthDepth = 2;
+  const ExpectimaxMatchResult expectimaxGreedy = runExpectimaxVsGreedy(50, kStrengthDepth);
+  printExpectimaxMatch(expectimaxGreedy, kStrengthDepth);
 
   double bestPerft = 0.0;
   for (const PerftResult& row : perftRows) {
@@ -313,7 +442,9 @@ int main() {
   std::cout << "\nsummary: best perft " << std::fixed << std::setprecision(3) << bestPerft
             << " Mnodes/s; random " << std::setprecision(1) << perSec(playouts.games, playouts.ms)
             << " games/s; greedy-v-random win " << std::setprecision(1)
-            << (100.0 * greedyRandom.greedyWins / greedyRandom.games) << "%\n";
+            << (100.0 * greedyRandom.greedyWins / greedyRandom.games)
+            << "%; expectimax-v-greedy win "
+            << (100.0 * expectimaxGreedy.expectimaxWins / expectimaxGreedy.games) << "%\n";
 
   return 0;
 }

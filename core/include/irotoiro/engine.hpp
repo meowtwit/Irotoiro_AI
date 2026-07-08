@@ -40,6 +40,17 @@ struct Window {
   std::array<uint8_t, 3> cells{};
 };
 
+struct DeterministicTurn {
+  GameState state;
+  int drawBatches = 0;
+  TurnStats stats;
+};
+
+struct ChanceOutcome {
+  double probability = 0.0;
+  GameState state;
+};
+
 class Rng {
  public:
   explicit Rng(uint32_t seed) : a_(seed) {}
@@ -64,6 +75,8 @@ int drawOneToHand(GameState& state, int player, Rng& rng);
 GameState initialState(Rng& rng);
 std::vector<Move> legalPlacements(const GameState& state);
 Move randomMove(const GameState& state, Rng& rng);
+DeterministicTurn resolveTurnDeterministic(const GameState& state, Move move);
+std::vector<ChanceOutcome> enumerateDrawOutcomes(const GameState& preDrawState, int drawBatches);
 TurnStats applyTurn(GameState& state, Move move, Rng& rng);
 
 std::string boardSignature(const GameState& state);
