@@ -80,6 +80,29 @@
   .adv-row input[type=number], .adv-row select { font-family:var(--font-body); font-size:13px; color:var(--ink); background:var(--sunken); border:1px solid var(--hairline); border-radius:8px; padding:6px 8px; }
   .adv-row input[type=number] { width:88px; font-variant-numeric:tabular-nums; }
 
+  /* advantage gauge */
+  .gauge { width:min(90vw,452px); margin:0 auto; }
+  .gauge-labels { display:flex; justify-content:space-between; font-size:10px; letter-spacing:.14em; color:var(--ink-soft); margin-bottom:5px; text-transform:uppercase; }
+  .gauge-track { position:relative; height:12px; border-radius:999px; background:var(--sunken); box-shadow:inset 1px 1px 3px var(--well-lo),inset -1px -1px 2px var(--well-hi); overflow:hidden; }
+  .gauge-fill { position:absolute; top:0; bottom:0; left:50%; width:0; border-radius:999px; transition:width .5s cubic-bezier(.2,.85,.25,1),left .5s cubic-bezier(.2,.85,.25,1),background .3s; }
+  .gauge-mid { position:absolute; left:50%; top:-1px; bottom:-1px; width:2px; background:var(--hairline); transform:translateX(-50%); z-index:1; }
+  .gauge-cap { font-size:11px; letter-spacing:.06em; color:var(--ink-soft); text-align:center; margin-top:5px; }
+  .gauge-cap b { color:var(--ink); }
+
+  /* AI thinking feed */
+  .feed-wrap { width:100%; max-width:520px; margin:0 auto; }
+  .feed { background:var(--surface); border:1px solid var(--hairline); border-radius:12px; box-shadow:var(--panel-shadow); padding:10px 13px; }
+  .feed-head { display:flex; align-items:center; justify-content:space-between; margin-bottom:7px; }
+  .feed-head .lbl { font-size:10px; letter-spacing:.16em; color:var(--ink-soft); text-transform:uppercase; }
+  .feed-list { max-height:128px; overflow-y:auto; display:flex; flex-direction:column; gap:2px; font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:11.5px; line-height:1.5; color:var(--ink-soft); font-variant-numeric:tabular-nums; }
+  .feed-line { animation:feedin .28s ease-out; white-space:nowrap; }
+  .feed-line.head { color:var(--ink); }
+  .feed-line.head::before { content:"▶ "; color:var(--accent); }
+  .feed-line.pick { color:var(--ink); }
+  .feed-line.pick::before { content:"→ "; color:var(--grn); }
+  .feed-line b { color:var(--ink); font-weight:600; }
+  @keyframes feedin { from{ opacity:0; transform:translateY(4px);} to{ opacity:1; transform:none;} }
+
   /* table layout: opponent (top) / board / you (bottom) — mirrored face-off */
   .table { display:flex; flex-direction:column; gap:clamp(12px,2vw,20px); align-items:center; }
 
@@ -230,11 +253,23 @@
     <section class="player" id="panel1" data-player="1"></section>
 
     <div class="board-wrap">
+      <div class="gauge">
+        <div class="gauge-labels"><span>AI 優勢</span><span>形勢</span><span>あなた 優勢</span></div>
+        <div class="gauge-track"><div class="gauge-mid"></div><div class="gauge-fill" id="gaugeFill"></div></div>
+        <div class="gauge-cap" id="gaugeCap"><b>互角</b></div>
+      </div>
       <div class="board" id="board" aria-label="5x5 の盤面"></div>
       <div class="status" id="status">おはじきの色を選んで、空いているマスに置きましょう。</div>
     </div>
 
     <section class="player" id="panel0" data-player="0"></section>
+
+    <div class="feed-wrap">
+      <div class="feed">
+        <div class="feed-head"><span class="lbl">AI 思考ログ</span><span class="lbl" id="feedMeta"></span></div>
+        <div class="feed-list" id="feedList"></div>
+      </div>
+    </div>
   </main>
 </div>
 
@@ -693,46 +728,75 @@
     return best;
   }
 
+  let lastStats = null;
+
   async function bestMove(state, opts) {
     const options = opts || {level:4};
+    const onProgress = typeof options.onProgress === 'function' ? options.onProgress : null;
     const stateCopy = I.cloneState(state);
     const legal = I.legalPlacements(stateCopy);
-    if (!legal.length) return null;
+    if (!legal.length) { lastStats = null; return null; }
+    const startedAt = now();
+    const npsOf = (nodes, ms) => nodes / Math.max(0.001, ms/1000);
 
-    if (options.level === 1) return randomMove(stateCopy, Math.random);
-    if (options.level === 2) return greedyMove(stateCopy);
+    if (options.level === 1) {
+      const mv = randomMove(stateCopy, Math.random);
+      lastStats = {mode:'random', depth:0, nodes:0, nps:0, ms:now()-startedAt, value:evaluate(stateCopy, stateCopy.toMove)};
+      if (onProgress) onProgress(lastStats);
+      return mv;
+    }
+    if (options.level === 2) {
+      const mv = greedyMove(stateCopy);
+      const ms = now()-startedAt;
+      lastStats = {mode:'greedy', depth:1, nodes:legal.length, nps:npsOf(legal.length, ms), ms, value:evaluate(stateCopy, stateCopy.toMove)};
+      if (onProgress) onProgress(lastStats);
+      return mv;
+    }
     if (options.depth != null) {
-      const result = await searchRootDepth(stateCopy, Math.max(1, options.depth), null);
-      return result.move || legal[0];
+      const d = Math.max(1, options.depth);
+      const result = await searchRootDepth(stateCopy, d, null);
+      const ms = now()-startedAt;
+      lastStats = {mode:'depth', depth:d, nodes:result.stats.nodes, nps:npsOf(result.stats.nodes, ms), ms, value:result.value};
+      if (onProgress) onProgress(lastStats);
+      return result.move ? {color:result.move.color, cell:result.move.cell} : legal[0];
     }
 
     let timeMs;
     if (options.timeMs != null) timeMs = Math.max(1, options.timeMs);
     else {
       const level = options.level == null ? 4 : options.level;
-      if (level <= 1) return randomMove(stateCopy, Math.random);
-      if (level === 2) return greedyMove(stateCopy);
       timeMs = LEVEL_TIME[level] || LEVEL_TIME[4];
     }
 
     const deadline = now() + timeMs;
     let best = greedyMove(stateCopy) || legal[0];
+    let bestValue = evaluate(stateCopy, stateCopy.toMove);
+    let totalNodes = 0, reachedDepth = 0;
     const maxDepth = Math.max(1, I.stockCount(stateCopy,0) + I.stockCount(stateCopy,1));
     for (let depth=1; depth<=maxDepth; depth++) {
       if (now() >= deadline) break;
       try {
         const result = await searchRootDepth(stateCopy, depth, deadline);
-        if (result.completed && result.move) best = result.move;
+        totalNodes += result.stats.nodes;
+        if (result.completed && result.move) { best = result.move; bestValue = result.value; reachedDepth = depth; }
+        const ms = now()-startedAt;
+        const info = {mode:'expectimax', depth, depthNodes:result.stats.nodes, nodes:totalNodes, nps:npsOf(totalNodes, ms), ms, value:result.value, completed:result.completed};
+        lastStats = info;
+        if (onProgress && result.completed) onProgress(info);
       } catch (err) {
         if (err instanceof AbortSearch) break;
         throw err;
       }
       await yieldTurn();
     }
+    const finalMs = now()-startedAt;
+    lastStats = {mode:'expectimax', depth:reachedDepth, nodes:totalNodes, nps:npsOf(totalNodes, finalMs), ms:finalMs, value:bestValue, completed:true};
     return {color:best.color, cell:best.cell};
   }
 
-  return {evaluate, resolveTurnDeterministic, enumerateDrawOutcomes, bestMove, randomMove, greedyMove};
+  function lastSearchStats(){ return lastStats; }
+
+  return {evaluate, resolveTurnDeterministic, enumerateDrawOutcomes, bestMove, randomMove, greedyMove, lastSearchStats};
 });
 
 /* ---------- UI ---------- */
@@ -773,6 +837,7 @@
     rng=I.makeRng((Math.random()*2**31)>>>0);
     state=I.initialState(rng); selected=null; busy=false; captured=[[],[]];
     for(let i=0;i<25;i++) renderCell(i);
+    feedClear();
     renderPanels(); renderChips();
     setStatus('おはじきの色を選んで、空いているマスに置きましょう。');
     document.getElementById('overlay').classList.remove('show');
@@ -782,6 +847,7 @@
   function renderChips(){
     document.getElementById('bagCount').textContent=I.bagCount(state);
     document.getElementById('turnText').textContent = I.isTerminal(state)?'対局終了':(state.toMove===HUMAN?'あなたの番':'AI の番');
+    updateGauge();
   }
   function updateActivePanel(){
     document.getElementById('panel0').classList.toggle('active', !I.isTerminal(state)&&state.toMove===HUMAN);
@@ -818,6 +884,31 @@
 
   function setStatus(html){ statusEl.innerHTML=html; }
 
+  // advantage gauge (from your perspective: >0 = you ahead)
+  function updateGauge(){
+    const fill=document.getElementById('gaugeFill'), cap=document.getElementById('gaugeCap');
+    if(!fill||!AI||!AI.evaluate) return;
+    const v=AI.evaluate(state, HUMAN);
+    const pct=Math.tanh(v/400), half=Math.abs(pct)*50;
+    if(pct>=0){ fill.style.left='50%'; fill.style.width=half+'%'; fill.style.background='var(--grn)'; }
+    else { fill.style.left=(50-half)+'%'; fill.style.width=half+'%'; fill.style.background='var(--red)'; }
+    cap.innerHTML='<b>'+(Math.abs(pct)<0.06?'互角':(pct>0?'あなた優勢':'AI優勢'))+'</b>';
+  }
+
+  // AI thinking feed
+  const fmt=n=>Math.round(n).toLocaleString('en-US');
+  const fmtNps=nps=> nps>=1e6?(nps/1e6).toFixed(2)+'M n/s' : nps>=1e3?(nps/1e3).toFixed(0)+'k n/s' : Math.round(nps)+' n/s';
+  function feedPush(html,cls){ const list=document.getElementById('feedList'); if(!list)return;
+    const d=document.createElement('div'); d.className='feed-line'+(cls?' '+cls:''); d.innerHTML=html; list.appendChild(d);
+    while(list.children.length>80) list.removeChild(list.firstChild); list.scrollTop=list.scrollHeight; }
+  function feedClear(){ const l=document.getElementById('feedList'); if(l) l.innerHTML=''; const m=document.getElementById('feedMeta'); if(m) m.textContent=''; }
+  function onAiProgress(info){
+    if(info.mode==='expectimax') feedPush(`深さ<b>${info.depth}</b> · ${fmt(info.nodes)} nodes · ${fmtNps(info.nps)} · ${Math.round(info.ms)}ms`);
+    else if(info.mode==='depth') feedPush(`深さ<b>${info.depth}</b>(固定) · ${fmt(info.nodes)} nodes · ${fmtNps(info.nps)} · ${Math.round(info.ms)}ms`);
+    else if(info.mode==='greedy') feedPush(`貪欲評価 · ${fmt(info.nodes)} 手を評価`);
+    else if(info.mode==='random') feedPush('ランダム選択');
+  }
+
   function selectColor(c){ if(busy||state.toMove!==HUMAN)return; selected=c; renderPanel(HUMAN); highlightCells();
     setStatus(`<b>${OHA_NAME[c]}</b> を選択中 — 置くマスをタップ。`); }
   function highlightCells(){ for(let i=0;i<25;i++) cellEls[i].classList.toggle('placeable', selected!==null&&state.board[i]===null&&state.toMove===HUMAN&&!busy); }
@@ -838,10 +929,14 @@
     if(I.isTerminal(state))return;
     busy=true; renderPanels(); renderChips(); updateActivePanel();
     setStatus(`AI が考えています…（${difficultyLabel()}）`);
+    feedPush(`AI 思考開始 · ${difficultyLabel()}`,'head');
     const t0=clock();
     let move=null;
-    try { move = await AI.bestMove(state, aiOpts()); } catch(e){ move=null; }
+    try { move = await AI.bestMove(state, Object.assign(aiOpts(), {onProgress:onAiProgress})); } catch(e){ move=null; }
     if(!move) move = I.randomBotMove(state, rng);
+    const st = (AI&&AI.lastSearchStats)?AI.lastSearchStats():null;
+    if(st){ feedPush(`着手決定 · 深さ<b>${st.depth}</b> · ${fmt(st.nodes)} nodes · ${fmtNps(st.nps)} · ${Math.round(st.ms)}ms`,'pick');
+      const m=document.getElementById('feedMeta'); if(m) m.textContent=`${fmtNps(st.nps)} · d${st.depth}`; }
     const dt=clock()-t0; if(dt<300) await wait(300-dt);   // 速いレベルでも一拍おく
     await doTurn(move);
     if(I.isTerminal(state)) endGame();

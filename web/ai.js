@@ -352,44 +352,73 @@
     return best;
   }
 
+  let lastStats = null;
+
   async function bestMove(state, opts) {
     const options = opts || {level:4};
+    const onProgress = typeof options.onProgress === 'function' ? options.onProgress : null;
     const stateCopy = I.cloneState(state);
     const legal = I.legalPlacements(stateCopy);
-    if (!legal.length) return null;
+    if (!legal.length) { lastStats = null; return null; }
+    const startedAt = now();
+    const npsOf = (nodes, ms) => nodes / Math.max(0.001, ms/1000);
 
-    if (options.level === 1) return randomMove(stateCopy, Math.random);
-    if (options.level === 2) return greedyMove(stateCopy);
+    if (options.level === 1) {
+      const mv = randomMove(stateCopy, Math.random);
+      lastStats = {mode:'random', depth:0, nodes:0, nps:0, ms:now()-startedAt, value:evaluate(stateCopy, stateCopy.toMove)};
+      if (onProgress) onProgress(lastStats);
+      return mv;
+    }
+    if (options.level === 2) {
+      const mv = greedyMove(stateCopy);
+      const ms = now()-startedAt;
+      lastStats = {mode:'greedy', depth:1, nodes:legal.length, nps:npsOf(legal.length, ms), ms, value:evaluate(stateCopy, stateCopy.toMove)};
+      if (onProgress) onProgress(lastStats);
+      return mv;
+    }
     if (options.depth != null) {
-      const result = await searchRootDepth(stateCopy, Math.max(1, options.depth), null);
-      return result.move || legal[0];
+      const d = Math.max(1, options.depth);
+      const result = await searchRootDepth(stateCopy, d, null);
+      const ms = now()-startedAt;
+      lastStats = {mode:'depth', depth:d, nodes:result.stats.nodes, nps:npsOf(result.stats.nodes, ms), ms, value:result.value};
+      if (onProgress) onProgress(lastStats);
+      return result.move ? {color:result.move.color, cell:result.move.cell} : legal[0];
     }
 
     let timeMs;
     if (options.timeMs != null) timeMs = Math.max(1, options.timeMs);
     else {
       const level = options.level == null ? 4 : options.level;
-      if (level <= 1) return randomMove(stateCopy, Math.random);
-      if (level === 2) return greedyMove(stateCopy);
       timeMs = LEVEL_TIME[level] || LEVEL_TIME[4];
     }
 
     const deadline = now() + timeMs;
     let best = greedyMove(stateCopy) || legal[0];
+    let bestValue = evaluate(stateCopy, stateCopy.toMove);
+    let totalNodes = 0, reachedDepth = 0;
     const maxDepth = Math.max(1, I.stockCount(stateCopy,0) + I.stockCount(stateCopy,1));
     for (let depth=1; depth<=maxDepth; depth++) {
       if (now() >= deadline) break;
       try {
         const result = await searchRootDepth(stateCopy, depth, deadline);
-        if (result.completed && result.move) best = result.move;
+        totalNodes += result.stats.nodes;
+        if (result.completed && result.move) { best = result.move; bestValue = result.value; reachedDepth = depth; }
+        const ms = now()-startedAt;
+        const info = {mode:'expectimax', depth, depthNodes:result.stats.nodes, nodes:totalNodes, nps:npsOf(totalNodes, ms), ms, value:result.value, completed:result.completed};
+        lastStats = info;
+        if (onProgress && result.completed) onProgress(info);
       } catch (err) {
         if (err instanceof AbortSearch) break;
         throw err;
       }
       await yieldTurn();
     }
+    const finalMs = now()-startedAt;
+    lastStats = {mode:'expectimax', depth:reachedDepth, nodes:totalNodes, nps:npsOf(totalNodes, finalMs), ms:finalMs, value:bestValue, completed:true};
     return {color:best.color, cell:best.cell};
   }
 
-  return {evaluate, resolveTurnDeterministic, enumerateDrawOutcomes, bestMove, randomMove, greedyMove};
+  function lastSearchStats(){ return lastStats; }
+
+  return {evaluate, resolveTurnDeterministic, enumerateDrawOutcomes, bestMove, randomMove, greedyMove, lastSearchStats};
 });
