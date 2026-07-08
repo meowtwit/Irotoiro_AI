@@ -1,5 +1,7 @@
 #include "irotoiro/engine.hpp"
+#include "irotoiro/bot.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
@@ -298,6 +300,36 @@ void testEdgeCases(TestContext& ctx) {
   testSameMixOnlyOneAvailable(ctx);
 }
 
+void testGreedyTakesImmediateExchange(TestContext& ctx) {
+  GameState s = edgeState();
+  putOha(s, 0, R);
+  putOha(s, 1, R);
+  s.stock = {{{0, 1, 0}, {0, 0, 0}}};
+  s.hand[0][P] = 1;
+  Rng rng(123);
+
+  Move move = greedyMove(s, rng);
+
+  CHECK_EQ(ctx, static_cast<int>(move.cell), 2);
+  CHECK_EQ(ctx, static_cast<int>(move.color), B);
+}
+
+void testGreedyReturnsLegalMoves(TestContext& ctx) {
+  for (uint32_t seed = 10; seed < 30; ++seed) {
+    Rng rng(seed);
+    GameState s = initialState(rng);
+    while (!isTerminal(s)) {
+      const std::vector<Move> legal = legalPlacements(s);
+      Move move = greedyMove(s, rng);
+      const bool found = std::any_of(legal.begin(), legal.end(), [&](Move legalMove) {
+        return legalMove.cell == move.cell && legalMove.color == move.color;
+      });
+      CHECK(ctx, found);
+      applyTurn(s, move, rng);
+    }
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -306,6 +338,8 @@ int main() {
   testGoldenSeeds(ctx);
   testAggregateParityAndInvariants(ctx);
   testEdgeCases(ctx);
+  testGreedyTakesImmediateExchange(ctx);
+  testGreedyReturnsLegalMoves(ctx);
 
   const int total = ctx.passed + ctx.failed;
   std::cout << "Irotoiro core tests\n";

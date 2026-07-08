@@ -7,6 +7,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_library(irotoiro_core
   core/src/engine.cpp
+  core/src/bot.cpp
 )
 target_include_directories(irotoiro_core
   PUBLIC
@@ -23,6 +24,16 @@ add_executable(irotoiro_core_tests
 target_link_libraries(irotoiro_core_tests PRIVATE irotoiro_core)
 target_compile_options(irotoiro_core_tests
   PRIVATE
+    -Wall -Wextra -Wpedantic
+)
+
+add_executable(irotoiro_bench
+  core/bench/bench.cpp
+)
+target_link_libraries(irotoiro_bench PRIVATE irotoiro_core)
+target_compile_options(irotoiro_bench
+  PRIVATE
+    -O3
     -Wall -Wextra -Wpedantic
 )
 
