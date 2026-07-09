@@ -231,8 +231,28 @@
     <div class="controls">
       <span class="chip" id="turnChip"><span class="turn-dot"></span><span id="turnText">あなたの番</span></span>
       <span class="chip">袋 <b id="bagCount">20</b></span>
-      <label class="chip levelchip" id="levelChip">AI
-        <select id="levelSel" aria-label="AIの強さ（レベル）">
+      <label class="chip levelchip" id="modeChip">形式
+        <select id="modeSel" aria-label="対戦形式">
+          <option value="hva" selected>人間 vs AI</option>
+          <option value="ava">AI vs AI（観戦）</option>
+        </select>
+      </label>
+      <label class="chip levelchip" id="levelChip0" style="display:none">先手
+        <select id="levelSel0" aria-label="先手AIの強さ">
+          <option value="1">Lv1 · ランダム</option>
+          <option value="2">Lv2 · 貪欲</option>
+          <option value="3">Lv3</option>
+          <option value="4" selected>Lv4</option>
+          <option value="5">Lv5</option>
+          <option value="6">Lv6</option>
+          <option value="7">Lv7</option>
+          <option value="8">Lv8</option>
+          <option value="9">Lv9</option>
+          <option value="10">Lv10 · 最強</option>
+        </select>
+      </label>
+      <label class="chip levelchip" id="levelChip"><span id="levelLbl">AI</span>
+        <select id="levelSel" aria-label="AI（後手）の強さ">
           <option value="1">Lv1 · ランダム</option>
           <option value="2">Lv2 · 貪欲</option>
           <option value="3">Lv3</option>
@@ -858,11 +878,16 @@
   const TILE_CLASS=['pur','grn','org'], TILE_NAME=['紫','緑','橙'];
   const HUMAN=0, BOT=1;
 
-  // AI difficulty: mode = 'level' | 'time' | 'depth'
-  let aiMode='level', aiLevel=4, aiTimeMs=400, aiDepth=4;
+  // AI difficulty: mode = 'level' | 'time' | 'depth' (advanced overrides apply to every AI player)
+  let aiMode='level', aiTimeMs=400, aiDepth=4;
+  let gameMode='hva';        // 'hva' = 人間 vs AI, 'ava' = AI vs AI（観戦）
+  const pLevel=[4,4];        // レベル [先手(P0), 後手(P1)]
+  let turnGen=0;             // bumped on newGame — guards against stale in-flight AI moves
   const clock=()=> (typeof performance!=='undefined'&&performance.now)?performance.now():Date.now();
-  function difficultyLabel(){ return aiMode==='time'?(aiTimeMs+'ms') : aiMode==='depth'?('深さ'+aiDepth) : ('Lv'+aiLevel); }
-  function aiOpts(){ return aiMode==='time'?{timeMs:aiTimeMs} : aiMode==='depth'?{depth:aiDepth} : {level:aiLevel}; }
+  function isHuman(p){ return gameMode==='hva' && p===HUMAN; }
+  function sideName(p){ return isHuman(p)?'あなた':(gameMode==='ava'?(p===0?'先手AI':'後手AI'):'AI'); }
+  function difficultyLabelFor(p){ return aiMode==='time'?(aiTimeMs+'ms') : aiMode==='depth'?('深さ'+aiDepth) : ('Lv'+pLevel[p]); }
+  function aiOptsFor(p){ return aiMode==='time'?{timeMs:aiTimeMs} : aiMode==='depth'?{depth:aiDepth} : {level:pLevel[p]}; }
 
   let state, rng, selected=null, busy=false, captured=[[],[]];
   const boardEl=document.getElementById('board');
@@ -885,6 +910,7 @@
   function showPiece(i,pc,animClass){ cellEls[i].innerHTML=pieceHTML(pc); if(animClass){ const el=cellEls[i].firstChild; if(el) el.classList.add(animClass); } }
 
   function newGame(){
+    turnGen++; stopAva();
     rng=I.makeRng((Math.random()*2**31)>>>0);
     state=I.initialState(rng); selected=null; busy=false; captured=[[],[]];
     for(let i=0;i<25;i++) renderCell(i);
@@ -893,7 +919,10 @@
     setStatus('おはじきの色を選んで、空いているマスに置きましょう。');
     document.getElementById('overlay').classList.remove('show');
     updateActivePanel();
-    setGaugeValue(0); refreshGauge();
+    stopAva();
+    setGaugeValue(0);
+    if(gameMode==='ava') runAva();
+    else refreshGauge();
   }
 
   function renderChips(){
@@ -908,29 +937,29 @@
   function renderPanels(){ renderPanel(HUMAN); renderPanel(BOT); }
   function renderPanel(p){
     const panel=document.getElementById('panel'+p);
-    const isHuman=p===HUMAN;
+    const human=isHuman(p);
     const capGems=captured[p].map(c=>`<div class="gem ${OHA_CLASS[c]}"></div>`).join('');
     const handTiles=[];
     for(let t=0;t<3;t++) for(let n=0;n<state.hand[p][t];n++) handTiles.push(tileHTML(t));
     const stockCols=[0,1,2].map(c=>{
       const cnt=state.stock[p][c];
-      const dis=(isHuman?(cnt<=0||busy||state.toMove!==HUMAN):true)?'disabled':'';
-      const sel=(isHuman&&selected===c)?'sel':'';
+      const dis=(human?(cnt<=0||busy||state.toMove!==HUMAN):true)?'disabled':'';
+      const sel=(human&&selected===c)?'sel':'';
       return `<div class="stockcol">
         <button class="stockbtn ${sel}" data-color="${c}" ${dis} aria-label="${OHA_NAME[c]} を選ぶ（残り${cnt}）">${ohaHTML(c)}</button>
         <span class="cnt">${cnt}</span></div>`;
     }).join('');
     panel.innerHTML=`
       <div class="player-head">
-        <span class="who">${isHuman?'あなた':'AI'}<small>${isHuman?'YOU':difficultyLabel()}</small></span>
+        <span class="who">${sideName(p)}<small>${human?'YOU':difficultyLabelFor(p)}</small></span>
         <span class="score-total" id="score${p}"><span class="lbl">得点</span>${state.score[p]}</span>
       </div>
       <div class="trays">
         <div class="tray"><div class="tray-label">得点</div><div class="captured">${capGems}</div></div>
         <div class="tray"><div class="tray-label">手札 タイル</div><div class="hand">${handTiles.join('')}</div></div>
-        <div class="tray"><div class="tray-label">手持ち おはじき</div><div class="stock ${isHuman?'':'readonly'}">${stockCols}</div></div>
+        <div class="tray"><div class="tray-label">手持ち おはじき</div><div class="stock ${human?'':'readonly'}">${stockCols}</div></div>
       </div>`;
-    if(isHuman){ panel.querySelectorAll('.stockbtn').forEach(b=>{ if(!b.disabled) b.addEventListener('click',()=>selectColor(+b.dataset.color)); }); }
+    if(human){ panel.querySelectorAll('.stockbtn').forEach(b=>{ if(!b.disabled) b.addEventListener('click',()=>selectColor(+b.dataset.color)); }); }
   }
 
   function setStatus(html){ statusEl.innerHTML=html; }
@@ -975,13 +1004,13 @@
     else if(info.mode==='random') feedPush('ランダム選択');
   }
 
-  function selectColor(c){ if(busy||state.toMove!==HUMAN)return; selected=c; renderPanel(HUMAN); highlightCells();
+  function selectColor(c){ if(gameMode!=='hva'||busy||state.toMove!==HUMAN)return; selected=c; renderPanel(HUMAN); highlightCells();
     setStatus(`<b>${OHA_NAME[c]}</b> を選択中 — 置くマスをタップ。`); }
   function highlightCells(){ for(let i=0;i<25;i++) cellEls[i].classList.toggle('placeable', selected!==null&&state.board[i]===null&&state.toMove===HUMAN&&!busy); }
   function clearHighlight(){ for(let i=0;i<25;i++) cellEls[i].classList.remove('placeable'); }
 
   async function onCell(i){
-    if(busy||state.toMove!==HUMAN||I.isTerminal(state))return;
+    if(gameMode!=='hva'||busy||state.toMove!==HUMAN||I.isTerminal(state))return;
     if(state.board[i]!==null)return;
     if(selected===null){ setStatus('まず、置くおはじきの色を選んでください。'); return; }
     const move={color:selected,cell:i}; selected=null; clearHighlight();
@@ -991,23 +1020,50 @@
     await botTurn();
   }
 
-  async function botTurn(){
-    if(I.isTerminal(state))return;
-    busy=true; renderPanels(); renderChips(); updateActivePanel();
-    setStatus(`AI が考えています…（${difficultyLabel()}）`);
-    feedPush(`AI 思考開始 · ${difficultyLabel()}`,'head');
+  // one AI player's turn (used by both 人間 vs AI and AI vs AI)
+  async function aiTurn(player){
+    const myGen=turnGen;
+    busy=true; clearHighlight(); renderPanels(); renderChips(); updateActivePanel();
+    setStatus(`${sideName(player)} が考えています…（${difficultyLabelFor(player)}）`);
+    feedPush(`${sideName(player)} 思考開始 · ${difficultyLabelFor(player)}`,'head');
     const t0=clock();
     let move=null;
-    try { move = await AI.bestMove(state, Object.assign(aiOpts(), {onProgress:onAiProgress})); } catch(e){ move=null; }
+    try { move = await AI.bestMove(state, Object.assign(aiOptsFor(player), {onProgress:onAiProgress})); } catch(e){ move=null; }
+    if(myGen!==turnGen) return;   // superseded during search (mode switch / new game)
     if(!move) move = I.randomBotMove(state, rng);
     const st = (AI&&AI.lastSearchStats)?AI.lastSearchStats():null;
     if(st){ feedPush(`着手決定 · 深さ<b>${st.depth}</b> · ${fmt(st.nodes)} nodes · ${fmtNps(st.nps)} · ${Math.round(st.ms)}ms`,'pick');
-      const m=document.getElementById('feedMeta'); if(m) m.textContent=`${fmtNps(st.nps)} · d${st.depth}`; }
+      const m=document.getElementById('feedMeta'); if(m) m.textContent=`${fmtNps(st.nps)} · d${st.depth}`;
+      // cheap live gauge from this search value (mover perspective -> your(P0) advantage)
+      const adv = player===HUMAN ? st.value : -st.value;
+      setGaugeValue(adv, st.depth);
+    }
     const dt=clock()-t0; if(dt<300) await wait(300-dt);   // 速いレベルでも一拍おく
     await doTurn(move);
+  }
+
+  async function botTurn(){
+    if(I.isTerminal(state))return;
+    const g=turnGen;
+    await aiTurn(BOT);
+    if(g!==turnGen) return;
     if(I.isTerminal(state)) endGame();
     else { setStatus('あなたの番です。おはじきの色を選んでください。'); refreshGauge(); }
   }
+
+  // AI vs AI watch loop
+  let avaGen=0;
+  async function runAva(){
+    const gen=++avaGen;
+    await wait(300);
+    while(gameMode==='ava' && gen===avaGen && !I.isTerminal(state)){
+      await aiTurn(state.toMove);
+      if(gen!==avaGen) return;         // superseded (mode change / new game)
+      await wait(520);                 // pacing between AI moves
+    }
+    if(gen===avaGen && I.isTerminal(state)) endGame();
+  }
+  function stopAva(){ avaGen++; }
 
   async function doTurn(move){
     busy=true; clearHighlight(); updateActivePanel();
@@ -1015,16 +1071,16 @@
     const ev=I.applyTurn(state,move,rng);   // mutates to final state
     for(const e of ev){
       if(e.type==='place'){ showPiece(e.cell,e.piece,'drop'); cellEls[e.cell].classList.add('land');
-        setStatus(`${mover===HUMAN?'あなた':'AI'}が <b>${OHA_NAME[e.piece.color]}</b> を置きました。`);
+        setStatus(`${sideName(mover)}が <b>${OHA_NAME[e.piece.color]}</b> を置きました。`);
         await wait(200); cellEls[e.cell].classList.remove('land'); }
       else if(e.type==='line-oha'){ e.window.forEach((c,k)=>setTimeout(()=>cellEls[c].classList.add('pulse'),k*55));
         await wait(360); e.window.forEach(c=>cellEls[c].classList.remove('pulse')); }
       else if(e.type==='exchange'){ showPiece(e.cell,{kind:'tile',color:e.tile},'flip'); captured[e.player].push(e.scoredColor);
         renderPanel(e.player); popScore(e.player);
-        setStatus(`3つ並び！ <b>${OHA_NAME[e.scoredColor]}</b> を <b>${TILE_NAME[e.tile]}</b> タイルと交換 → ${e.player===HUMAN?'あなた':'AI'} +1点`);
+        setStatus(`3つ並び！ <b>${OHA_NAME[e.scoredColor]}</b> を <b>${TILE_NAME[e.tile]}</b> タイルと交換 → ${sideName(e.player)} +1点`);
         await wait(300); }
       else if(e.type==='steal-point'){ moveCaptured(e.from,e.to); renderPanels(); popScore(e.to); flashPanel(e.to);
-        setStatus(`タイル3つ並び！ ${e.to===HUMAN?'あなた':'AI'} が相手から <b>1点</b> を奪いました。`); await wait(320); }
+        setStatus(`タイル3つ並び！ ${sideName(e.to)} が相手から <b>1点</b> を奪いました。`); await wait(320); }
       else if(e.type==='steal-tile'){ renderPanels(); flashPanel(e.to);
         setStatus(`タイル3つ並び！ 相手は0点 → <b>${TILE_NAME[e.tile]}</b> タイルを奪いました。`); await wait(320); }
       else if(e.type==='draw'){ renderPanel(e.player);
@@ -1039,13 +1095,15 @@
   function moveCaptured(from,to){ const g=captured[from].pop(); captured[to].push(g!==undefined?g:0); }
 
   function endGame(){
+    stopAva();
     clearHighlight(); renderChips(); updateActivePanel();
-    const s0=state.score[HUMAN], s1=state.score[BOT];
+    const s0=state.score[0], s1=state.score[1];
+    const n0=sideName(0), n1=sideName(1);
     const t=document.getElementById('ovTitle'), b=document.getElementById('ovBody');
-    if(s0>s1) t.textContent='あなたの勝ち！';
-    else if(s1>s0) t.textContent='AI の勝ち';
+    if(s0>s1) t.textContent = gameMode==='hva'?'あなたの勝ち！':(n0+' の勝ち');
+    else if(s1>s0) t.textContent = n1+' の勝ち';
     else t.textContent='引き分け';
-    b.innerHTML=`あなた <b>${s0}</b> — <b>${s1}</b> AI（${difficultyLabel()}）`;
+    b.innerHTML=`${n0}（${isHuman(0)?'YOU':difficultyLabelFor(0)}） <b>${s0}</b> — <b>${s1}</b> ${n1}（${difficultyLabelFor(1)}）`;
     setStatus('対局終了。');
     document.getElementById('overlay').classList.add('show');
   }
@@ -1062,17 +1120,27 @@
   document.getElementById('rulesBtn').addEventListener('click',()=>dlg.showModal());
   document.getElementById('rulesClose').addEventListener('click',()=>dlg.close());
 
-  // difficulty controls
-  const levelSel=document.getElementById('levelSel');
+  // difficulty & mode controls
+  const modeSel=document.getElementById('modeSel');
+  const levelSel=document.getElementById('levelSel');    // 後手 (P1)
+  const levelSel0=document.getElementById('levelSel0');  // 先手 (P0)
   const levelChip=document.getElementById('levelChip');
+  const levelChip0=document.getElementById('levelChip0');
+  const levelLbl=document.getElementById('levelLbl');
   const advDlg=document.getElementById('advDlg');
   function syncDifficultyUI(){
-    levelSel.disabled = aiMode!=='level';
-    levelChip.classList.toggle('adv-active', aiMode!=='level');
-    if(!busy && state) renderPanel(BOT);
+    const adv = aiMode!=='level';
+    levelSel.disabled = adv; levelSel0.disabled = adv;
+    levelChip.classList.toggle('adv-active', adv);
+    levelChip0.classList.toggle('adv-active', adv);
+    levelChip0.style.display = gameMode==='ava' ? '' : 'none';
+    levelLbl.textContent = gameMode==='ava' ? '後手' : 'AI';
+    if(!busy && state){ renderPanel(0); renderPanel(1); }
   }
-  levelSel.addEventListener('change',()=>{ aiLevel=+levelSel.value; aiMode='level';
-    const r=advDlg.querySelector('input[name="aimode"][value="level"]'); if(r) r.checked=true; syncDifficultyUI(); });
+  function markLevelMode(){ const r=advDlg.querySelector('input[name="aimode"][value="level"]'); if(r) r.checked=true; }
+  levelSel.addEventListener('change',()=>{ pLevel[1]=+levelSel.value; aiMode='level'; markLevelMode(); syncDifficultyUI(); });
+  levelSel0.addEventListener('change',()=>{ pLevel[0]=+levelSel0.value; aiMode='level'; markLevelMode(); syncDifficultyUI(); });
+  modeSel.addEventListener('change',()=>{ gameMode = modeSel.value==='ava'?'ava':'hva'; syncDifficultyUI(); newGame(); });
   document.getElementById('advBtn').addEventListener('click',()=>{
     advDlg.querySelector(`input[name="aimode"][value="${aiMode}"]`).checked=true;
     document.getElementById('advTime').value=aiTimeMs;
@@ -1083,7 +1151,7 @@
     const mode=advDlg.querySelector('input[name="aimode"]:checked').value;
     aiTimeMs=Math.max(10,Math.min(8000,parseInt(document.getElementById('advTime').value,10)||400));
     aiDepth=Math.max(1,Math.min(24,parseInt(document.getElementById('advDepth').value,10)||4));
-    aiMode=mode; if(mode==='level') aiLevel=+levelSel.value;
+    aiMode=mode; if(mode==='level'){ pLevel[0]=+levelSel0.value; pLevel[1]=+levelSel.value; }
     syncDifficultyUI(); advDlg.close();
   });
   document.getElementById('advClose').addEventListener('click',()=>advDlg.close());
